@@ -21,7 +21,7 @@ export function applyMultibandTransient(buffer, onProgress = () => { }) {
   const f1 = 200;   // Low-Mid crossover
   const f2 = 4000;  // Mid-High crossover
 
-  // Band settings from user specification (Updated for Suno Optimization)
+  // Band settings from user specification (updated for AI-source optimization)
   const bands = {
     low: {
       fastAttack: 0.005,    // 5ms

@@ -1,7 +1,7 @@
 /**
  * AI-generated / lossy-source mastering repair.
  *
- * Suno-style MP3 exports often arrive with hyped upper mids, smeared air,
+ * AI-generated MP3 exports often arrive with hyped upper mids, smeared air,
  * loose sub energy, and a stereo image that feels wide but collapses poorly.
  * This module adds a conservative, analysis-driven correction pass before the
  * color/loudness stages so the rest of the chain has a cleaner source to lift.

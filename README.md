@@ -1,6 +1,6 @@
 # Web Audio Mastering
 
-A desktop app for mastering AI-generated music (Suno, Udio, etc.) or any other audio to streaming-ready quality.
+A desktop app for mastering AI-generated music or any other audio to streaming-ready quality.
 
 **[Try it in your browser](https://entrepeneur4lyf.github.io/Web-Audio-Mastering/)** - No installation required!
 
@@ -98,7 +98,7 @@ ISC
 
 ## Acknowledgements
 
-This project is based on [Suno-Song-Remaster](https://github.com/SUP3RMASS1VE/Suno-Song-Remaster) by SUP3RMASS1VE, licensed under the ISC License.
+This project is based on an open-source AI song remastering project by SUP3RMASS1VE, licensed under the ISC License.
 
 ```
 ISC License

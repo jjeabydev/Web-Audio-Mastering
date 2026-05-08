@@ -60,7 +60,7 @@ This is the canonical ordering for parity (Worker path).
 
 **Default:** -3.5 dB
 
-**Purpose:** Gives the enhancement, clipper, and limiter stages room to work before loudness recovery. This is especially useful for Suno/MP3 sources, which often arrive already close to 0 dBFS with limited true-peak headroom.
+**Purpose:** Gives the enhancement, clipper, and limiter stages room to work before loudness recovery. This is especially useful for AI/MP3 sources, which often arrive already close to 0 dBFS with limited true-peak headroom.
 
 **Rationale:** Many commercial mastering flows leave a few dB of pre-chain headroom rather than driving processors at file peak. The final normalization and true-peak stages recover loudness after corrective processing.
 
@@ -121,7 +121,7 @@ This is the canonical ordering for parity (Worker path).
 
 **File:** `web/lib/dsp/ai-mastering.js`
 
-**Purpose:** Automatic corrective pass for Suno-style / AI-generated MP3 sources before enhancement stages.
+**Purpose:** Automatic corrective pass for AI-generated MP3 sources before enhancement stages.
 
 **Default:** ENABLED internally
 
@@ -154,7 +154,7 @@ Auto analyzes crest factor, harshness, air, sub/bass balance, and presence/body 
 
 **File:** `web/lib/dsp/ai-mastering.js` (`applyReferenceMatch`)
 
-**Purpose:** Optional reference-track matching for users who want a Suno/MP3 master to move toward a commercial song's tonal balance.
+**Purpose:** Optional reference-track matching for users who want an AI/MP3 master to move toward a commercial song's tonal balance.
 
 **Default:** OFF until a reference is loaded and enabled
 

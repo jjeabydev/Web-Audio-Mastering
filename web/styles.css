@@ -201,6 +201,10 @@ body {
   font-size: 8px;
 }
 
+.check-item.pending {
+  color: var(--theme-accent);
+}
+
 /* Main Content */
 .main-content {
   flex: 1;
@@ -499,6 +503,81 @@ body {
 
 .hidden {
   display: none !important;
+}
+
+body:not(.advanced-mode) .advanced-control {
+  display: none !important;
+}
+
+body:not(.advanced-mode) .panel-grid {
+  grid-template-columns: minmax(320px, 2fr) minmax(220px, 1fr);
+}
+
+body:not(.advanced-mode) .eq-row {
+  grid-template-columns: minmax(320px, 1fr);
+  flex: 0;
+}
+
+body:not(.advanced-mode) .loudness-card {
+  grid-column: auto;
+}
+
+/* Mastering Assistant */
+.assistant-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  flex-shrink: 0;
+}
+
+.assistant-presets {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(86px, 1fr));
+  gap: 8px;
+  width: min(620px, 100%);
+}
+
+.assistant-preset {
+  height: 32px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.assistant-preset:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+
+.assistant-preset.active {
+  background: var(--theme-accent);
+  border-color: var(--theme-accent);
+  color: var(--theme-background);
+}
+
+.advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.advanced-toggle input {
+  accent-color: var(--theme-accent);
+  cursor: pointer;
 }
 
 /* Settings Grid */
@@ -1286,4 +1365,20 @@ body {
   overflow: auto;
   height: auto;
   min-height: auto;
+}
+
+@media (max-width: 900px) {
+  .assistant-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .assistant-presets {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .advanced-toggle {
+    justify-content: flex-end;
+  }
 }

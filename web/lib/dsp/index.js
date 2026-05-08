@@ -110,7 +110,7 @@ export {
   tightenSound
 } from './transient.js';
 
-// Multiband Transient Shaper (Suno Optimization)
+// Multiband Transient Shaper (AI-source optimization)
 export {
   applyMultibandTransient
 } from './multiband-transient.js';

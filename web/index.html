@@ -22,7 +22,10 @@
       </div>
       <div class="header-right">
         <div class="checklist-mini">
-          <div class="check-item" id="mini-format"><span>●</span> WAV Ready</div>
+          <div class="check-item" id="mini-format"><span>●</span> File</div>
+          <div class="check-item active" id="mini-mastering"><span>●</span> AI Auto</div>
+          <div class="check-item" id="mini-reference"><span>●</span> Reference</div>
+          <div class="check-item" id="mini-live"><span>●</span> Live</div>
         </div>
         <label class="tips-toggle">
           <input type="checkbox" id="showTips" checked>
@@ -52,7 +55,7 @@
               <div class="info-panel-content">
                 <a href="https://github.com/entrepeneur4lyf/Web-Audio-Mastering" target="_blank">Web Audio Mastering</a>
                 <br>
-                Originally based on <a href="https://github.com/SUP3RMASS1VE/Suno-Song-Remaster" target="_blank">Suno-Song-Remaster</a>
+                Originally based on an open-source AI song remastering project
                 <br><span class="info-license">Licensed under ISC</span>
               </div>
             </div>
@@ -168,12 +171,26 @@
         </div>
       </div>
 
+      <div class="assistant-bar">
+        <div class="assistant-presets" aria-label="Mastering presets">
+          <button class="assistant-preset" type="button" data-mastering-preset="manual">Manual</button>
+          <button class="assistant-preset active" type="button" data-mastering-preset="ai-auto">AI Auto</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="ai-clean">AI Clean</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="ai-loud">AI Loud</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="reference">Match Ref</button>
+        </div>
+        <label class="advanced-toggle" data-tip="Show detailed mastering controls. Simple mode keeps commercial-style safe defaults active.">
+          <input type="checkbox" id="advancedMode">
+          <span>Advanced</span>
+        </label>
+      </div>
+
       <!-- Settings Grid - 4 columns -->
       <div class="panel-grid">
         <div class="settings-card">
           <h3>Quick Fix <span class="live-badge">Live</span></h3>
           <label class="toggle-row"
-            data-tip="Automatic Suno/MP3 mastering repair: adapts harshness, mud, low-end cleanup, clipper drive, and final loudness behavior.">
+            data-tip="Automatic AI/MP3 mastering repair: adapts harshness, mud, low-end cleanup, clipper drive, and final loudness behavior.">
             <span>AI Mastering</span>
             <input type="checkbox" id="aiEnhance" checked>
             <span class="toggle"></span>
@@ -200,13 +217,13 @@
           </div>
           <div class="slider-row" data-tip="Controls how strongly the AI mastering profile changes tone, artifact repair, and limiter behavior.">
             <span>Intensity</span>
-            <input type="range" id="aiIntensity" min="50" max="150" step="5" value="100">
-            <span class="slider-value" id="aiIntensityValue">100%</span>
+            <input type="range" id="aiIntensity" min="50" max="150" step="5" value="105">
+            <span class="slider-value" id="aiIntensityValue">105%</span>
           </div>
-          <div class="slider-row" data-tip="Controls harsh S/F sounds, splashy cymbals, and brittle AI high-frequency artifacts.">
+          <div class="slider-row advanced-control" data-tip="Controls harsh S/F sounds, splashy cymbals, and brittle AI high-frequency artifacts.">
             <span>Sibilance</span>
-            <input type="range" id="sibilanceProtection" min="0" max="100" step="5" value="60">
-            <span class="slider-value" id="sibilanceProtectionValue">60%</span>
+            <input type="range" id="sibilanceProtection" min="0" max="100" step="5" value="65">
+            <span class="slider-value" id="sibilanceProtectionValue">65%</span>
           </div>
           <label class="toggle-row"
             data-tip="Match tonal balance and loudness behavior toward a loaded reference track.">
@@ -225,29 +242,29 @@
             <input type="range" id="referenceAmount" min="0" max="100" step="5" value="65">
             <span class="slider-value" id="referenceAmountValue">65%</span>
           </div>
-          <label class="toggle-row"
+          <label class="toggle-row advanced-control"
             data-tip="Multiband compression to glue the mix together with balanced frequency control.">
             <span>Glue Compression</span>
             <input type="checkbox" id="glueCompression" checked>
             <span class="toggle"></span>
           </label>
-          <label class="toggle-row"
+          <label class="toggle-row advanced-control"
             data-tip="Multiband dynamic processor: de-esses, tames resonances, smooths AI artifacts in the 3-12kHz range.">
             <span>De-harsh</span>
             <input type="checkbox" id="deharsh" checked>
             <span class="toggle"></span>
           </label>
-          <label class="toggle-row" data-tip="Removes sub-bass rumble below 30Hz and fixes DC offset.">
+          <label class="toggle-row advanced-control" data-tip="Removes sub-bass rumble below 30Hz and fixes DC offset.">
             <span>Clean Low End</span>
             <input type="checkbox" id="cleanLowEnd" checked>
             <span class="toggle"></span>
           </label>
-          <label class="toggle-row" data-tip="Intelligent gain automation that balances quiet and loud sections.">
+          <label class="toggle-row advanced-control" data-tip="Intelligent gain automation that balances quiet and loud sections.">
             <span>Auto Level</span>
-            <input type="checkbox" id="autoLevel">
+            <input type="checkbox" id="autoLevel" checked>
             <span class="toggle"></span>
           </label>
-          <label class="toggle-row"
+          <label class="toggle-row advanced-control"
             data-tip="Multiband transient shaper: adds punch to kicks (low), snap to snares (mid), leaves highs alone.">
             <span>Add Punch</span>
             <input type="checkbox" id="addPunch" checked>
@@ -255,7 +272,7 @@
           </label>
         </div>
 
-        <div class="settings-card">
+        <div class="settings-card advanced-control">
           <h3>Stereo <span class="live-badge">Live</span></h3>
           <div class="slider-row" data-tip="Stereo width: 0% = mono, 100% = original, 200% = extra wide.">
             <span>Width</span>
@@ -269,7 +286,7 @@
           </label>
         </div>
 
-        <div class="settings-card">
+        <div class="settings-card advanced-control">
           <h3>Polish <span class="live-badge">Live</span></h3>
           <label class="toggle-row" data-tip="Reduces muddy frequencies around 250Hz for clarity.">
             <span>Cut Mud</span>
@@ -296,7 +313,7 @@
             <button class="output-preset-btn" data-preset="cd"
               data-tip="44.1kHz/16-bit - CD-compatible WAV with dither">CD</button>
           </div>
-          <div class="select-row"
+          <div class="select-row advanced-control"
             data-tip="48kHz is preferred by distributors. Better quality through encoding pipelines.">
             <span>Sample Rate</span>
             <select id="sampleRate">
@@ -304,14 +321,14 @@
               <option value="48000" selected>48 kHz</option>
             </select>
           </div>
-          <div class="select-row" data-tip="24-bit preferred by distributors. More headroom through encoding.">
+          <div class="select-row advanced-control" data-tip="24-bit preferred by distributors. More headroom through encoding.">
             <span>Bit Depth</span>
             <select id="bitDepth">
               <option value="16">16-bit</option>
               <option value="24" selected>24-bit</option>
             </select>
           </div>
-          <label class="toggle-row" id="ditherNoiseShapingRow"
+          <label class="toggle-row advanced-control" id="ditherNoiseShapingRow"
             data-tip="16-bit only: shapes dither noise toward higher frequencies for cleaner low-level detail.">
             <span>Noise-Shaped Dither</span>
             <input type="checkbox" id="ditherNoiseShaping">
@@ -362,7 +379,7 @@
         </div>
 
         <!-- 5-Band EQ -->
-        <div class="eq-section">
+        <div class="eq-section advanced-control">
           <h3>EQ <span class="live-badge">Live</span></h3>
           <div class="eq-bands">
             <div class="eq-band" id="eqLowFader" data-tip="Low shelf at 80Hz"></div>

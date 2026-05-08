@@ -144,7 +144,7 @@ const DEFAULT_BANDS = [
     freqHigh: 6000,
     attackMs: 2,        // Faster attack for harsh transients
     releaseMs: 40,
-    thresholdDb: -26,   // Lower threshold for Suno harshness (Was -24)
+    thresholdDb: -26,   // Lower threshold for AI-source harshness (Was -24)
     ratio: 5,           // Higher ratio
     kneeDb: 4,
     enabled: true

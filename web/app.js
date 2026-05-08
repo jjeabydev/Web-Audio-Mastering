@@ -7,6 +7,8 @@ import {
   findTruePeak,
   normalizeToLUFS,
   analyzeAIGeneratedMastering,
+  chooseAIMasteringProfile,
+  getAIGeneratedMasteringMoves,
   detectDCOffsetBuffer,
   removeDCOffset,
   getDCOffsetSeverity
@@ -81,6 +83,12 @@ const audioNodes = {
   lowshelf: null,    // mud cut
   highshelf: null,   // air boost
   midPeak: null,     // harshness
+  previewBass: null,
+  previewMud: null,
+  previewPresence: null,
+  previewSibilance: null,
+  previewHarsh: null,
+  previewAir: null,
   compressor: null,
   limiter: null,
   // 5-band EQ
@@ -162,6 +170,9 @@ function showToast(message, type = '', duration = 5000) {
 
 // Mini checklist
 const miniFormat = document.getElementById('mini-format');
+const miniMastering = document.getElementById('mini-mastering');
+const miniReference = document.getElementById('mini-reference');
+const miniLive = document.getElementById('mini-live');
 
 // Settings elements (referenced for special handling)
 const normalizeLoudness = document.getElementById('normalizeLoudness');
@@ -194,6 +205,8 @@ const addAir = document.getElementById('addAir');
 const tapeWarmth = document.getElementById('tapeWarmth');
 const autoLevel = document.getElementById('autoLevel');
 const addPunch = document.getElementById('addPunch');
+const advancedMode = document.getElementById('advancedMode');
+const assistantPresetButtons = document.querySelectorAll('.assistant-preset');
 
 // Transport display elements
 const currentTimeEl = document.getElementById('currentTime');
@@ -308,6 +321,12 @@ function createAudioChain() {
   audioNodes.lowshelf = ctx.createBiquadFilter();
   audioNodes.highshelf = ctx.createBiquadFilter();
   audioNodes.midPeak = ctx.createBiquadFilter();
+  audioNodes.previewBass = ctx.createBiquadFilter();
+  audioNodes.previewMud = ctx.createBiquadFilter();
+  audioNodes.previewPresence = ctx.createBiquadFilter();
+  audioNodes.previewSibilance = ctx.createBiquadFilter();
+  audioNodes.previewHarsh = ctx.createBiquadFilter();
+  audioNodes.previewAir = ctx.createBiquadFilter();
   audioNodes.compressor = ctx.createDynamicsCompressor();
   audioNodes.limiter = ctx.createDynamicsCompressor();
 
@@ -379,6 +398,29 @@ function createAudioChain() {
   audioNodes.midPeak.Q.value = 2;
   audioNodes.midPeak.gain.value = 0;
 
+  audioNodes.previewBass.type = 'lowshelf';
+  audioNodes.previewBass.frequency.value = 95;
+  audioNodes.previewBass.gain.value = 0;
+  audioNodes.previewMud.type = 'peaking';
+  audioNodes.previewMud.frequency.value = 280;
+  audioNodes.previewMud.Q.value = 1.1;
+  audioNodes.previewMud.gain.value = 0;
+  audioNodes.previewPresence.type = 'peaking';
+  audioNodes.previewPresence.frequency.value = 3900;
+  audioNodes.previewPresence.Q.value = 1.0;
+  audioNodes.previewPresence.gain.value = 0;
+  audioNodes.previewSibilance.type = 'peaking';
+  audioNodes.previewSibilance.frequency.value = 6200;
+  audioNodes.previewSibilance.Q.value = 2.3;
+  audioNodes.previewSibilance.gain.value = 0;
+  audioNodes.previewHarsh.type = 'peaking';
+  audioNodes.previewHarsh.frequency.value = 7800;
+  audioNodes.previewHarsh.Q.value = 1.6;
+  audioNodes.previewHarsh.gain.value = 0;
+  audioNodes.previewAir.type = 'highshelf';
+  audioNodes.previewAir.frequency.value = 12500;
+  audioNodes.previewAir.gain.value = 0;
+
   // Configure glue compressor
   audioNodes.compressor.threshold.value = -18;
   audioNodes.compressor.knee.value = 10;
@@ -416,6 +458,12 @@ function createAudioChain() {
     .connect(audioNodes.lowshelf)
     .connect(audioNodes.midPeak)
     .connect(audioNodes.highshelf)
+    .connect(audioNodes.previewBass)
+    .connect(audioNodes.previewMud)
+    .connect(audioNodes.previewPresence)
+    .connect(audioNodes.previewSibilance)
+    .connect(audioNodes.previewHarsh)
+    .connect(audioNodes.previewAir)
     .connect(audioNodes.compressor)
     .connect(audioNodes.stereoSplitter);
 
@@ -507,6 +555,8 @@ function applyLiveChainParams() {
   // midPeak filter (unused - harshness taming now handled by deharsh dynamic processor)
   audioNodes.midPeak.gain.value = 0;
 
+  applyPreviewApproximation();
+
   // Glue Compression
   if (glueCompression.checked && !playerState.isBypassed) {
     audioNodes.compressor.threshold.value = -18;
@@ -524,6 +574,64 @@ function applyLiveChainParams() {
   } else {
     audioNodes.limiter.threshold.value = 0;
     audioNodes.limiter.ratio.value = 1;
+  }
+}
+
+function applyPreviewApproximation() {
+  const previewNodes = [
+    audioNodes.previewBass,
+    audioNodes.previewMud,
+    audioNodes.previewPresence,
+    audioNodes.previewSibilance,
+    audioNodes.previewHarsh,
+    audioNodes.previewAir
+  ];
+
+  if (!previewNodes.every(Boolean)) return;
+
+  const reset = () => {
+    previewNodes.forEach(node => {
+      node.gain.value = 0;
+    });
+  };
+
+  if (!fileState.forceLivePreview || playerState.isBypassed || !fileState.originalBuffer) {
+    reset();
+    return;
+  }
+
+  try {
+    const settings = getCurrentSettings();
+    const analysis = analyzeAIGeneratedMastering(fileState.originalBuffer);
+    const profile = chooseAIMasteringProfile(analysis, settings.aiProfile || 'auto');
+    const moves = getAIGeneratedMasteringMoves(
+      analysis,
+      Math.max(0.25, Math.min(1.75, (profile.repairStrength ?? 1) * (settings.aiIntensity ?? 1))),
+      profile,
+      { sibilanceProtection: settings.sibilanceProtection ?? 0.6 }
+    );
+
+    const previewScale = 0.55;
+    audioNodes.previewBass.gain.value = moves.bassLift * previewScale;
+    audioNodes.previewMud.gain.value = moves.mudCut * previewScale;
+    audioNodes.previewPresence.gain.value = moves.presenceCut * previewScale;
+    audioNodes.previewSibilance.gain.value = moves.sibilanceCut * previewScale;
+    audioNodes.previewHarsh.gain.value = moves.harshCut * previewScale;
+    audioNodes.previewAir.gain.value = moves.airShelf * previewScale;
+
+    if (settings.referenceMatch && settings.referenceAnalysis) {
+      const refSource = analysis.profile;
+      const refTarget = settings.referenceAnalysis.profile;
+      const amount = Math.max(0, Math.min(1, settings.referenceAmount ?? 0.65)) * 0.45;
+      audioNodes.previewBass.gain.value += Math.max(-0.8, Math.min(0.8, (refTarget.subToBassDB - refSource.subToBassDB) * -0.18 * amount));
+      audioNodes.previewMud.gain.value += Math.max(-1.2, Math.min(0.8, (refTarget.mudDB - refSource.mudDB) * 0.32 * amount));
+      audioNodes.previewPresence.gain.value += Math.max(-1, Math.min(0.8, (refTarget.presenceToBodyDB - refSource.presenceToBodyDB) * 0.28 * amount));
+      audioNodes.previewHarsh.gain.value += Math.max(-1.2, Math.min(0.4, (refTarget.harshDB - refSource.harshDB) * 0.24 * amount));
+      audioNodes.previewAir.gain.value += Math.max(-0.9, Math.min(0.9, (refTarget.airDB - refSource.airDB) * 0.22 * amount));
+    }
+  } catch (err) {
+    console.warn('[Preview] Failed to apply live approximation:', err);
+    reset();
   }
 }
 
@@ -593,6 +701,9 @@ function switchToLivePreview() {
   const currentTime = getPlaybackPosition();
   playerState.pauseTime = Math.max(0, Math.min(currentTime, liveBuffer.duration - 0.001));
   fileState.forceLivePreview = true;
+  applyLiveChainParams();
+  updateStereoWidth();
+  updateEQ();
   playAudio();
 }
 
@@ -658,6 +769,7 @@ function scheduleRenderToCache(options = {}) {
   if (outputLufsDisplay) {
     outputLufsDisplay.textContent = '... LUFS';
   }
+  updateChecklist();
 
   // Debounce the actual render
   cacheRenderTimeout = setTimeout(async () => {
@@ -724,6 +836,7 @@ function scheduleRenderToCache(options = {}) {
         fileState.cachedRenderBuffer = buffer;
         fileState.cachedRenderLufs = lufs;
         fileState.forceLivePreview = false;
+        applyLiveChainParams();
 
         // Update LUFS display
         if (outputLufsDisplay) {
@@ -740,6 +853,7 @@ function scheduleRenderToCache(options = {}) {
         stopBtn.disabled = false;
 
         console.log('[Cache] Render complete, version:', thisVersion, 'LUFS:', lufs.toFixed(1));
+        updateChecklist();
 
         // If we're actively previewing FX, hot-swap to the new master-preview buffer.
         // This keeps meters/audio in sync with the full chain (including final limiter)
@@ -760,8 +874,10 @@ function scheduleRenderToCache(options = {}) {
       // Still enable playback on error so user isn't stuck
       playBtn.disabled = false;
       stopBtn.disabled = false;
+      updateChecklist();
     } finally {
       fileState.isRenderingCache = false;
+      updateChecklist();
       if (cacheRenderQueued && fileState.originalBuffer) {
         const runQueuedImmediately = cacheRenderQueuedImmediate;
         cacheRenderQueued = false;
@@ -883,14 +999,17 @@ async function loadReferenceFile(file) {
     setReferenceAnalysis(analysis);
     referenceMatch.checked = true;
     referenceName.textContent = file.name;
+    setAssistantPresetActive('reference');
     showToast(`Reference loaded: ${file.name}`, 'success', 3000);
     schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+    updateChecklist();
   } catch (error) {
     console.error('Reference analysis failed:', error);
     setReferenceAnalysis(null);
     referenceMatch.checked = false;
     referenceName.textContent = 'No reference';
     showToast(`Reference failed: ${error.message}`, 'error');
+    updateChecklist();
   } finally {
     hideLoadingModal();
   }
@@ -1279,7 +1398,9 @@ clearReferenceBtn.addEventListener('click', () => {
   setReferenceAnalysis(null);
   referenceMatch.checked = false;
   referenceName.textContent = 'No reference';
+  setAssistantPresetActive('');
   schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  updateChecklist();
 });
 
 // Handle file input change
@@ -1631,6 +1752,119 @@ cancelBtn.addEventListener('click', cancelProcessing);
 
 function updateChecklist() {
   miniFormat.classList.toggle('active', fileState.selectedFilePath !== null);
+  if (miniMastering) {
+    const profileLabel = aiProfile?.selectedOptions?.[0]?.textContent || 'AI Auto';
+    miniMastering.classList.toggle('active', aiEnhance?.checked ?? true);
+    miniMastering.textContent = (aiEnhance?.checked ?? true) ? `● ${profileLabel}` : '● Manual';
+  }
+  if (miniReference) {
+    const hasReference = referenceMatch?.checked && referenceName?.textContent !== 'No reference';
+    miniReference.classList.toggle('active', hasReference);
+  }
+  if (miniLive) {
+    const isPending = fileState.isRenderingCache || fileState.forceLivePreview || cacheRenderTimeout;
+    miniLive.classList.toggle('active', Boolean(fileState.cachedRenderBuffer) && !isPending);
+    miniLive.classList.toggle('pending', Boolean(isPending));
+    miniLive.textContent = isPending ? '● Updating' : '● Live';
+  }
+}
+
+function setAdvancedMode(enabled) {
+  document.body.classList.toggle('advanced-mode', enabled);
+  if (advancedMode) advancedMode.checked = enabled;
+}
+
+function setAssistantPresetActive(name) {
+  assistantPresetButtons.forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.masteringPreset === name);
+  });
+}
+
+function updateSliderLabels() {
+  aiIntensityValue.textContent = `${aiIntensity.value}%`;
+  sibilanceProtectionValue.textContent = `${sibilanceProtection.value}%`;
+  referenceAmountValue.textContent = `${referenceAmount.value}%`;
+  stereoWidthValue.textContent = `${stereoWidthSlider.value}%`;
+  targetLufsValue.textContent = `${targetLufsSlider.value} LUFS`;
+}
+
+function setTargetLufsControl(value) {
+  targetLufsSlider.value = String(value);
+  setTargetLufs(value);
+}
+
+function applyAssistantPreset(name) {
+  if (name === 'manual') {
+    aiEnhance.checked = false;
+    referenceMatch.checked = false;
+    setAssistantPresetActive('manual');
+    updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
+    updateChecklist();
+    return;
+  }
+
+  aiEnhance.checked = true;
+  normalizeLoudness.checked = true;
+  truePeakLimit.checked = true;
+  cleanLowEnd.checked = true;
+  glueCompression.checked = true;
+  deharsh.checked = true;
+  centerBass.checked = true;
+  autoLevel.checked = true;
+
+  if (name === 'ai-clean') {
+    aiProfile.value = 'clean';
+    aiIntensity.value = '90';
+    sibilanceProtection.value = '70';
+    setTargetLufsControl(-14);
+    limiterCharacter.value = 'transparent';
+    addPunch.checked = false;
+    tapeWarmth.checked = false;
+    addAir.checked = false;
+    referenceMatch.checked = false;
+  } else if (name === 'ai-loud') {
+    aiProfile.value = 'loud';
+    aiIntensity.value = '115';
+    sibilanceProtection.value = '70';
+    setTargetLufsControl(-9);
+    limiterCharacter.value = 'dense';
+    addPunch.checked = true;
+    tapeWarmth.checked = true;
+    addAir.checked = false;
+    referenceMatch.checked = false;
+  } else if (name === 'reference') {
+    aiProfile.value = 'auto';
+    aiIntensity.value = '100';
+    sibilanceProtection.value = '65';
+    referenceAmount.value = '65';
+    setTargetLufsControl(-12);
+    limiterCharacter.value = 'balanced';
+    addPunch.checked = true;
+    tapeWarmth.checked = true;
+    addAir.checked = false;
+    if (referenceName.textContent === 'No reference') {
+      selectReferenceBtn.click();
+    } else {
+      referenceMatch.checked = true;
+    }
+  } else {
+    aiProfile.value = 'auto';
+    aiIntensity.value = '105';
+    sibilanceProtection.value = '65';
+    setTargetLufsControl(-12);
+    limiterCharacter.value = 'balanced';
+    addPunch.checked = true;
+    tapeWarmth.checked = true;
+    addAir.checked = false;
+    referenceMatch.checked = false;
+  }
+
+  stereoWidthSlider.value = '100';
+  updateSliderLabels();
+  setAssistantPresetActive(name);
+  updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  updateOutputPresetButtons(outputPresets);
+  updateChecklist();
 }
 
 // Special handling for normalizeLoudness to switch buffers
@@ -1659,10 +1893,21 @@ normalizeLoudness.addEventListener('change', () => {
   });
 });
 
+advancedMode.addEventListener('change', () => {
+  setAdvancedMode(advancedMode.checked);
+});
+
+assistantPresetButtons.forEach(btn => {
+  btn.addEventListener('click', () => {
+    applyAssistantPreset(btn.dataset.masteringPreset);
+  });
+});
+
 // Deharsh, Exciter (Add Air), Tape Warmth, and Multiband Transient (Add Punch) require re-processing the buffer
 // These are applied offline for preview/export parity
 [deharsh, aiEnhance, aiProfile, addAir, tapeWarmth, addPunch].forEach(el => {
   el.addEventListener('change', () => {
+    setAssistantPresetActive('');
     processEffects();
     updateChecklist();
   });
@@ -1670,6 +1915,7 @@ normalizeLoudness.addEventListener('change', () => {
 
 aiIntensity.addEventListener('input', () => {
   aiIntensityValue.textContent = `${aiIntensity.value}%`;
+  setAssistantPresetActive('');
   if (playerState.isPlaying && !playerState.isBypassed) {
     schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
   }
@@ -1682,6 +1928,7 @@ aiIntensity.addEventListener('change', () => {
 
 sibilanceProtection.addEventListener('input', () => {
   sibilanceProtectionValue.textContent = `${sibilanceProtection.value}%`;
+  setAssistantPresetActive('');
   if (playerState.isPlaying && !playerState.isBypassed) {
     schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
   }
@@ -1693,12 +1940,14 @@ sibilanceProtection.addEventListener('change', () => {
 });
 
 referenceMatch.addEventListener('change', () => {
+  setAssistantPresetActive(referenceMatch.checked ? 'reference' : '');
   schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
   updateChecklist();
 });
 
 referenceAmount.addEventListener('input', () => {
   referenceAmountValue.textContent = `${referenceAmount.value}%`;
+  setAssistantPresetActive(referenceMatch.checked ? 'reference' : '');
   if (playerState.isPlaying && !playerState.isBypassed) {
     schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
   }
@@ -1981,6 +2230,8 @@ setupOutputPresets(outputPresets, () => {
 updateDitherControlState();
 updateOutputPresetButtons(outputPresets);
 
+setAdvancedMode(false);
+updateSliderLabels();
 updateChecklist();
 
 // Initialize DSP worker for off-main-thread processing
