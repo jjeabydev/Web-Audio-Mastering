@@ -26,7 +26,10 @@ import {
   processHybridDynamic,
   applyFinalFilters,
   applyMasteringSoftClip,
-  applyLookaheadLimiter
+  applyLookaheadLimiter,
+  applyAIGeneratedMasteringRepair,
+  applyReferenceMatch,
+  finalizeMasteringTarget
 } from '../lib/dsp/index.js';
 
 /**
@@ -539,7 +542,7 @@ function applyMasteringSoftClipToChannels(channels, sampleRate, ceilingDB = -1, 
   const length = channels[0].length;
 
   const ceilingLin = Math.pow(10, ceilingDB / 20);
-  const thresholdLin = Math.pow(10, (ceilingDB + 3) / 20); // Start 3dB above ceiling
+  const thresholdLin = Math.pow(10, (ceilingDB - 3) / 20); // Start 3dB below ceiling
   const lookaheadSamples = Math.floor(sampleRate * lookaheadMs / 1000);
   const releaseCoef = Math.exp(-1 / (releaseMs * sampleRate / 1000));
 
@@ -558,7 +561,9 @@ function applyMasteringSoftClipToChannels(channels, sampleRate, ceilingDB = -1, 
         const excess = abs - thresholdLin;
         const range = ceilingLin - thresholdLin;
         const normalized = excess / Math.max(range, 0.001);
-        const saturated = Math.tanh(normalized * drive);
+        const saturated = normalized <= 1
+          ? Math.pow(normalized, drive)
+          : 1;
         const targetLevel = thresholdLin + saturated * range;
         const requiredGain = targetLevel / abs;
 
@@ -566,7 +571,7 @@ function applyMasteringSoftClipToChannels(channels, sampleRate, ceilingDB = -1, 
         const startIdx = Math.max(0, i - lookaheadSamples);
         for (let j = startIdx; j <= i; j++) {
           // Interpolate gain reduction across lookahead
-          const t = (j - startIdx) / Math.max(1, i - startIdx);
+          const t = i === startIdx ? 1 : (j - startIdx) / (i - startIdx);
           const interpolatedGain = 1.0 + (requiredGain - 1.0) * t;
           gainEnvelope[j] = Math.min(gainEnvelope[j], interpolatedGain);
         }
@@ -1503,9 +1508,48 @@ self.onmessage = async (e) => {
         }
 
         // 1. Deharsh / Hybrid Dynamic Processor (if enabled)
+        let aiProfile = {
+          softClipDrive: 1.5,
+          maxLimiterPushDB: 1.2
+        };
+
         if (settings.deharsh) {
           sendProgress(id, 0.15, 'Applying hybrid dynamic processor...');
           buffer = processHybridDynamic(buffer, 'mastering');
+        }
+
+        // 1.5 AI-generated / lossy-source repair
+        if (settings.aiEnhance !== false) {
+          sendProgress(id, 0.22, 'Repairing AI/MP3 artifacts...');
+          const repaired = applyAIGeneratedMasteringRepair(buffer, {
+            profile: settings.aiProfile || 'auto',
+            intensity: settings.aiIntensity ?? 1,
+            sibilanceProtection: settings.sibilanceProtection ?? 0.6
+          });
+          buffer = repaired.buffer;
+          aiProfile = repaired.profile || aiProfile;
+          if (repaired.moves) {
+            console.log('[Worker Chain] AI profile:', aiProfile.name, 'moves:', repaired.moves);
+          }
+        }
+
+        if (settings.autoLevel) {
+          sendProgress(id, 0.26, 'Applying auto level...');
+          const leveledChannels = applyDynamicLevelingToChannels(
+            Array.from({ length: buffer.numberOfChannels }, (_, ch) => buffer.getChannelData(ch)),
+            buffer.sampleRate,
+            id,
+            {
+              windowMs: 250,
+              quietThresholdDB: -42,
+              expansionRatio: 1.12,
+              maxGainDB: 3,
+              crestThresholdDB: 12
+            }
+          );
+          for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+            buffer.copyToChannel(leveledChannels[ch], ch);
+          }
         }
 
         // 2. Exciter / Add Air (if enabled)
@@ -1524,6 +1568,17 @@ self.onmessage = async (e) => {
         if (settings.addPunch) {
           sendProgress(id, 0.55, 'Applying multiband transient...');
           buffer = applyMultibandTransient(buffer);
+        }
+
+        if (settings.referenceMatch && settings.referenceAnalysis) {
+          sendProgress(id, 0.58, 'Matching reference...');
+          const matched = applyReferenceMatch(buffer, settings.referenceAnalysis, {
+            amount: settings.referenceAmount ?? 0.65
+          });
+          buffer = matched.buffer;
+          if (matched.moves) {
+            console.log('[Worker Chain] Reference moves:', matched.moves);
+          }
         }
 
         // --- PREVIEW MODE END ---
@@ -1582,8 +1637,10 @@ self.onmessage = async (e) => {
         if (buffer.numberOfChannels === 2) {
           const stereoWidthValue = Number(settings.stereoWidth);
           const width = Number.isFinite(stereoWidthValue) ? stereoWidthValue / 100 : 1.0;
-          const clampedWidth = Math.max(0, Math.min(2, width));
+          const profileWidth = aiProfile.stereoWidthScale ?? 1;
+          const clampedWidth = Math.max(0, Math.min(2, width * profileWidth));
           const bassMono = !!settings.centerBass;
+          const bassFreq = aiProfile.bassMonoFreq ?? 200;
 
           if (bassMono || Math.abs(clampedWidth - 1.0) > 1e-6) {
             sendProgress(id, 0.72, 'Applying stereo processing...');
@@ -1591,7 +1648,7 @@ self.onmessage = async (e) => {
               [buffer.getChannelData(0), buffer.getChannelData(1)],
               buffer.sampleRate,
               null,
-              { width: clampedWidth, bassMono, bassFreq: 200 }
+              { width: clampedWidth, bassMono, bassFreq }
             );
             buffer.copyToChannel(processed[0], 0);
             buffer.copyToChannel(processed[1], 1);
@@ -1610,11 +1667,16 @@ self.onmessage = async (e) => {
         if (settings.truePeakLimit) {
           sendProgress(id, 0.85, 'Applying soft clipper...');
           const ceiling = settings.truePeakCeiling || -1;
+          const limiterCharacter = settings.limiterCharacter || 'balanced';
+          const limiterDriveScale = limiterCharacter === 'transparent' ? 0.85
+            : limiterCharacter === 'punch' ? 1.05
+              : limiterCharacter === 'dense' ? 1.2
+                : 1.0;
           buffer = applyMasteringSoftClip(buffer, {
             ceiling: ceiling,
             lookaheadMs: 0.5,
             releaseMs: 10,
-            drive: 1.5
+            drive: (aiProfile.softClipDrive ?? 1.5) * Math.sqrt(settings.aiIntensity ?? 1) * limiterDriveScale
           });
         }
 
@@ -1643,6 +1705,22 @@ self.onmessage = async (e) => {
           for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
             buffer.copyToChannel(limitedChannels[ch], ch);
           }
+        }
+
+        if (settings.normalizeLoudness && settings.targetLufs && settings.truePeakLimit) {
+          sendProgress(id, 0.98, 'Calibrating final loudness...');
+          const calibrated = finalizeMasteringTarget(buffer, {
+            targetLufs: settings.targetLufs,
+            ceilingDB: settings.truePeakCeiling || -1,
+            toleranceDB: 0.15,
+            maxLimiterPushDB: (aiProfile.maxLimiterPushDB ?? 1.2) * Math.sqrt(settings.aiIntensity ?? 1) * (
+              settings.limiterCharacter === 'transparent' ? 0.75
+                : settings.limiterCharacter === 'punch' ? 1.05
+                  : settings.limiterCharacter === 'dense' ? 1.25
+                    : 1.0
+            )
+          });
+          buffer = calibrated.buffer;
         }
 
         // Measure final LUFS

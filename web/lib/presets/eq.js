@@ -26,7 +26,7 @@ export const eqPresets = {
  */
 export const outputPresets = {
   streaming: { sampleRate: 48000, bitDepth: 24 },  // 48k/24-bit preferred by distributors
-  studio: { sampleRate: 48000, bitDepth: 24 }
+  cd: { sampleRate: 44100, bitDepth: 16 }
 };
 
 /**

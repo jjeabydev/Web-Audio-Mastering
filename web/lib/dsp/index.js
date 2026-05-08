@@ -176,3 +176,13 @@ export {
   applyMasteringSoftClip
 } from './soft-clipper.js';
 
+// AI-generated / lossy-source mastering repair
+export {
+  AI_MASTERING_PROFILES,
+  analyzeAIGeneratedMastering,
+  chooseAIMasteringProfile,
+  getAIGeneratedMasteringMoves,
+  applyAIGeneratedMasteringRepair,
+  applyReferenceMatch,
+  finalizeMasteringTarget
+} from './ai-mastering.js';

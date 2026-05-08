@@ -19,9 +19,12 @@ export const eqValues = {
 };
 
 // Input gain and ceiling values (managed by faders)
-export let inputGainValue = 0;  // dB
-export let ceilingValueDb = -1; // dB
-export let targetLufsDb = -14;   // Target LUFS for normalization
+export const DEFAULT_INPUT_HEADROOM_DB = -3.5;
+export const DEFAULT_CEILING_DB = -1;
+export const DEFAULT_TARGET_LUFS = -12;
+export let inputGainValue = DEFAULT_INPUT_HEADROOM_DB;  // dB
+export let ceilingValueDb = DEFAULT_CEILING_DB; // dB
+export let targetLufsDb = DEFAULT_TARGET_LUFS; // Target LUFS for normalization
 
 // Fader instances
 const faders = {
@@ -40,8 +43,15 @@ const faders = {
 
 const normalizeLoudness = document.getElementById('normalizeLoudness');
 const truePeakLimit = document.getElementById('truePeakLimit');
+const limiterCharacter = document.getElementById('limiterCharacter');
 const cleanLowEnd = document.getElementById('cleanLowEnd');
 const glueCompression = document.getElementById('glueCompression');
+const aiEnhance = document.getElementById('aiEnhance');
+const aiProfile = document.getElementById('aiProfile');
+const aiIntensity = document.getElementById('aiIntensity');
+const sibilanceProtection = document.getElementById('sibilanceProtection');
+const referenceMatch = document.getElementById('referenceMatch');
+const referenceAmount = document.getElementById('referenceAmount');
 const deharsh = document.getElementById('deharsh');
 const stereoWidthSlider = document.getElementById('stereoWidth');
 const centerBass = document.getElementById('centerBass');
@@ -55,6 +65,12 @@ const bitDepth = document.getElementById('bitDepth');
 const ditherNoiseShaping = document.getElementById('ditherNoiseShaping');
 const targetLufsSlider = document.getElementById('targetLufs');
 
+let referenceAnalysis = null;
+
+export function setReferenceAnalysis(analysis) {
+  referenceAnalysis = analysis || null;
+}
+
 // ============================================================================
 // Settings Getters
 // ============================================================================
@@ -66,8 +82,9 @@ const targetLufsSlider = document.getElementById('targetLufs');
 export function getCurrentSettings() {
   return {
     normalizeLoudness: normalizeLoudness.checked,
-    targetLufs: parseInt(targetLufsSlider.value),
+    targetLufs: parseFloat(targetLufsSlider.value),
     truePeakLimit: truePeakLimit.checked,
+    limiterCharacter: limiterCharacter?.value || 'balanced',
     truePeakCeiling: ceilingValueDb,
     cleanLowEnd: cleanLowEnd.checked,
     glueCompression: glueCompression.checked,
@@ -78,6 +95,13 @@ export function getCurrentSettings() {
     addAir: addAir.checked,
     tapeWarmth: tapeWarmth.checked,
     autoLevel: autoLevel.checked,
+    aiEnhance: aiEnhance?.checked ?? true,
+    aiProfile: aiProfile?.value || 'auto',
+    aiIntensity: (parseFloat(aiIntensity?.value) || 100) / 100,
+    sibilanceProtection: (parseFloat(sibilanceProtection?.value) || 0) / 100,
+    referenceMatch: referenceMatch?.checked ?? false,
+    referenceAmount: (parseFloat(referenceAmount?.value) || 65) / 100,
+    referenceAnalysis,
     addPunch: addPunch.checked,
     inputGain: inputGainValue,
     eqLow: eqValues.low,
@@ -131,7 +155,8 @@ export function initFaders(callbacks = {}) {
   faders.inputGain = new Fader('#inputGainFader', {
     min: -12,
     max: 12,
-    value: 0,
+    value: DEFAULT_INPUT_HEADROOM_DB,
+    resetValue: DEFAULT_INPUT_HEADROOM_DB,
     step: 0.5,
     label: 'Input',
     unit: 'dB',
@@ -152,7 +177,8 @@ export function initFaders(callbacks = {}) {
   faders.ceiling = new Fader('#ceilingFader', {
     min: -6,
     max: 0,
-    value: -1,
+    value: DEFAULT_CEILING_DB,
+    resetValue: DEFAULT_CEILING_DB,
     step: 0.5,
     label: 'Ceiling',
     unit: 'dB',
@@ -183,6 +209,7 @@ export function initFaders(callbacks = {}) {
       min: -12,
       max: 12,
       value: 0,
+      resetValue: 0,
       step: 0.5,
       label: label,
       unit: 'dB',

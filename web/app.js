@@ -6,6 +6,7 @@ import {
   measureLUFS,
   findTruePeak,
   normalizeToLUFS,
+  analyzeAIGeneratedMastering,
   detectDCOffsetBuffer,
   removeDCOffset,
   getDCOffsetSeverity
@@ -29,6 +30,7 @@ import {
   setupOutputPresets,
   updateOutputPresetButtons,
   setTargetLufs,
+  setReferenceAnalysis,
   // Meters
   meterState,
   startMeter,
@@ -108,7 +110,8 @@ const fileState = {
   cachedRenderBuffer: null,  // Fully rendered buffer (all DSP applied)
   cachedRenderLufs: null,    // LUFS measured from cached buffer
   isRenderingCache: false,   // True while rendering to cache
-  cacheRenderVersion: 0      // Increments on each settings change
+  cacheRenderVersion: 0,     // Increments on each settings change
+  forceLivePreview: false    // True while waiting for full rendered preview to catch up
 };
 
 // Level meter state imported from ./ui/meters.js
@@ -122,6 +125,10 @@ let processingPromise = null; // Track processing for proper cancellation
 // ============================================================================
 
 const fileInput = document.getElementById('fileInput'); // Browser file input
+const referenceInput = document.getElementById('referenceInput');
+const selectReferenceBtn = document.getElementById('selectReference');
+const clearReferenceBtn = document.getElementById('clearReference');
+const referenceName = document.getElementById('referenceName');
 
 const selectFileBtn = document.getElementById('selectFile');
 const changeFileBtn = document.getElementById('changeFile');
@@ -160,6 +167,10 @@ const miniFormat = document.getElementById('mini-format');
 const normalizeLoudness = document.getElementById('normalizeLoudness');
 const sampleRate = document.getElementById('sampleRate');
 const bitDepth = document.getElementById('bitDepth');
+const limiterCharacter = document.getElementById('limiterCharacter');
+const referenceMatch = document.getElementById('referenceMatch');
+const referenceAmount = document.getElementById('referenceAmount');
+const referenceAmountValue = document.getElementById('referenceAmountValue');
 const ditherNoiseShaping = document.getElementById('ditherNoiseShaping');
 const ditherNoiseShapingRow = document.getElementById('ditherNoiseShapingRow');
 const targetLufsSlider = document.getElementById('targetLufs');
@@ -167,6 +178,22 @@ const targetLufsValue = document.getElementById('targetLufsValue');
 const stereoWidthSlider = document.getElementById('stereoWidth');
 const stereoWidthValue = document.getElementById('stereoWidthValue');
 const outputLufsDisplay = document.getElementById('outputLufs');
+const truePeakLimit = document.getElementById('truePeakLimit');
+const cleanLowEnd = document.getElementById('cleanLowEnd');
+const glueCompression = document.getElementById('glueCompression');
+const deharsh = document.getElementById('deharsh');
+const aiEnhance = document.getElementById('aiEnhance');
+const aiProfile = document.getElementById('aiProfile');
+const aiIntensity = document.getElementById('aiIntensity');
+const aiIntensityValue = document.getElementById('aiIntensityValue');
+const sibilanceProtection = document.getElementById('sibilanceProtection');
+const sibilanceProtectionValue = document.getElementById('sibilanceProtectionValue');
+const centerBass = document.getElementById('centerBass');
+const cutMud = document.getElementById('cutMud');
+const addAir = document.getElementById('addAir');
+const tapeWarmth = document.getElementById('tapeWarmth');
+const autoLevel = document.getElementById('autoLevel');
+const addPunch = document.getElementById('addPunch');
 
 // Transport display elements
 const currentTimeEl = document.getElementById('currentTime');
@@ -275,7 +302,7 @@ function createAudioChain() {
 
   // Create nodes
   audioNodes.inputGain = ctx.createGain();
-  audioNodes.inputGain.gain.value = 1.0; // 0dB default
+  audioNodes.inputGain.gain.value = Math.pow(10, inputGainValue / 20);
   audioNodes.gain = ctx.createGain();
   audioNodes.highpass = ctx.createBiquadFilter();
   audioNodes.lowshelf = ctx.createBiquadFilter();
@@ -441,7 +468,7 @@ async function processEffects() {
   // - Preview plays from cached buffer
   // - LUFS meter reads from cached buffer
   // - Export uses cached buffer
-  scheduleRenderToCache();
+  schedulePreviewUpdate();
 
   console.log('[Preview] Scheduled cache render with full DSP chain');
 }
@@ -500,7 +527,7 @@ function applyLiveChainParams() {
   }
 }
 
-function updateAudioChain({ scheduleCache = true } = {}) {
+function updateAudioChain({ scheduleCache = true, immediate = false, delayMs = undefined } = {}) {
   if (!audioNodes.context || !audioNodes.highpass) return;
 
   applyLiveChainParams();
@@ -508,7 +535,7 @@ function updateAudioChain({ scheduleCache = true } = {}) {
   // Trigger cache render when settings change (not when merely toggling bypass)
   // This ensures preview/meter/export all use the same rendered buffer.
   if (scheduleCache && fileState.originalBuffer) {
-    scheduleRenderToCache();
+    scheduleRenderToCache({ immediate, delayMs });
   }
 }
 
@@ -557,6 +584,18 @@ function connectDirectToOutput(source) {
   }
 }
 
+function switchToLivePreview() {
+  if (!playerState.isPlaying || playerState.isBypassed || !audioNodes.context || !fileState.originalBuffer) {
+    return;
+  }
+
+  const liveBuffer = fileState.normalizedBuffer || fileState.originalBuffer;
+  const currentTime = getPlaybackPosition();
+  playerState.pauseTime = Math.max(0, Math.min(currentTime, liveBuffer.duration - 0.001));
+  fileState.forceLivePreview = true;
+  playAudio();
+}
+
 function updateEQ() {
   if (!audioNodes.eqLow) return;
 
@@ -590,7 +629,9 @@ function updateInputGain() {
 // Debounce timer for cache render
 let cacheRenderTimeout = null;
 let cacheRenderQueued = false;
+let cacheRenderQueuedImmediate = false;
 const CACHE_RENDER_DEBOUNCE_MS = 500;
+const LIVE_PREVIEW_RENDER_DEBOUNCE_MS = 80;
 
 // getCurrentSettings imported from ./ui/controls.js
 
@@ -598,7 +639,12 @@ const CACHE_RENDER_DEBOUNCE_MS = 500;
  * Schedule a render to the cache buffer (debounced)
  * This is called whenever settings change
  */
-function scheduleRenderToCache() {
+function scheduleRenderToCache(options = {}) {
+  const {
+    immediate = false,
+    delayMs = immediate ? 0 : CACHE_RENDER_DEBOUNCE_MS
+  } = options;
+
   // Clear any pending render
   if (cacheRenderTimeout) {
     clearTimeout(cacheRenderTimeout);
@@ -620,10 +666,12 @@ function scheduleRenderToCache() {
     if (fileState.isRenderingCache) {
       // Already rendering; remember to run one more pass when it completes.
       cacheRenderQueued = true;
+      cacheRenderQueuedImmediate = cacheRenderQueuedImmediate || immediate;
       return;
     }
 
     cacheRenderQueued = false;
+    cacheRenderQueuedImmediate = false;
     fileState.isRenderingCache = true;
     console.log('[Cache] Starting render, version:', thisVersion);
 
@@ -675,6 +723,7 @@ function scheduleRenderToCache() {
       if (thisVersion === fileState.cacheRenderVersion) {
         fileState.cachedRenderBuffer = buffer;
         fileState.cachedRenderLufs = lufs;
+        fileState.forceLivePreview = false;
 
         // Update LUFS display
         if (outputLufsDisplay) {
@@ -714,11 +763,29 @@ function scheduleRenderToCache() {
     } finally {
       fileState.isRenderingCache = false;
       if (cacheRenderQueued && fileState.originalBuffer) {
+        const runQueuedImmediately = cacheRenderQueuedImmediate;
         cacheRenderQueued = false;
-        scheduleRenderToCache();
+        cacheRenderQueuedImmediate = false;
+        scheduleRenderToCache({ immediate: runQueuedImmediately });
       }
     }
-  }, CACHE_RENDER_DEBOUNCE_MS);
+  }, delayMs);
+}
+
+function schedulePreviewUpdate(options = {}) {
+  if (playerState.isPlaying && !playerState.isBypassed && options.liveNow !== false) {
+    switchToLivePreview();
+  }
+
+  scheduleRenderToCache({
+    immediate: playerState.isPlaying && !playerState.isBypassed,
+    ...options
+  });
+}
+
+function getPlaybackPosition() {
+  if (!audioNodes.context || !playerState.isPlaying) return playerState.pauseTime;
+  return audioNodes.context.currentTime - playerState.startTime;
 }
 
 // ============================================================================
@@ -797,6 +864,37 @@ async function cancelProcessing() {
 }
 
 modalCancelBtn.addEventListener('click', cancelProcessing);
+
+async function loadReferenceFile(file) {
+  const ctx = initAudioContext();
+  showLoadingModal('Analyzing reference...', 10);
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    showLoadingModal('Decoding reference...', 35);
+    const decodedBuffer = await ctx.decodeAudioData(arrayBuffer);
+
+    showLoadingModal('Measuring reference...', 70);
+    const analysis = analyzeAIGeneratedMastering(decodedBuffer);
+    analysis.lufs = measureLUFS(decodedBuffer);
+    analysis.truePeak = findTruePeak(decodedBuffer);
+    analysis.sampleRate = decodedBuffer.sampleRate;
+
+    setReferenceAnalysis(analysis);
+    referenceMatch.checked = true;
+    referenceName.textContent = file.name;
+    showToast(`Reference loaded: ${file.name}`, 'success', 3000);
+    schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  } catch (error) {
+    console.error('Reference analysis failed:', error);
+    setReferenceAnalysis(null);
+    referenceMatch.checked = false;
+    referenceName.textContent = 'No reference';
+    showToast(`Reference failed: ${error.message}`, 'error');
+  } finally {
+    hideLoadingModal();
+  }
+}
 
 async function loadAudioFile(file) {
   const ctx = initAudioContext();
@@ -949,8 +1047,12 @@ function playAudio() {
 
     useDirectOutput = true; // Skip effects chain entirely
   } else {
-    // FX ON: play cached processed buffer if available
-    if (fileState.cachedRenderBuffer) {
+    // FX ON: use the live chain immediately while a new rendered preview is catching up.
+    if (fileState.forceLivePreview) {
+      playbackBuffer = fileState.normalizedBuffer || fileState.originalBuffer || audioNodes.buffer;
+      useDirectOutput = false;
+      console.log('[Playback] FX ON - live preview while cache renders');
+    } else if (fileState.cachedRenderBuffer) {
       playbackBuffer = fileState.cachedRenderBuffer;
       useDirectOutput = true; // Cached buffer is full chain (includes final limiter) - do NOT run through live chain.
       console.log('[Playback] FX ON - using cachedRenderBuffer (Full Chain)');
@@ -1080,7 +1182,10 @@ function seekTo(time) {
       }
       useDirectOutput = true;
     } else {
-      if (fileState.cachedRenderBuffer) {
+      if (fileState.forceLivePreview) {
+        playbackBuffer = fileState.normalizedBuffer || fileState.originalBuffer || audioNodes.buffer;
+        useDirectOutput = false;
+      } else if (fileState.cachedRenderBuffer) {
         playbackBuffer = fileState.cachedRenderBuffer;
         // Cached buffer is full chain (includes final limiter) - do NOT run through live chain.
         useDirectOutput = true;
@@ -1156,6 +1261,25 @@ changeFileBtn.addEventListener('click', () => {
   stopAudio();
   playerState.pauseTime = 0;
   fileInput.click();
+});
+
+selectReferenceBtn.addEventListener('click', () => {
+  referenceInput.click();
+});
+
+referenceInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (file) {
+    await loadReferenceFile(file);
+  }
+  referenceInput.value = '';
+});
+
+clearReferenceBtn.addEventListener('click', () => {
+  setReferenceAnalysis(null);
+  referenceMatch.checked = false;
+  referenceName.textContent = 'No reference';
+  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
 });
 
 // Handle file input change
@@ -1302,6 +1426,7 @@ bypassBtn.addEventListener('click', () => {
 
   // Update waveform display to show original or processed
   if (playerState.isBypassed) {
+    fileState.forceLivePreview = false;
     // Show original waveform (from the original file blob, not a converted AudioBuffer)
     showOriginalWaveform();
   } else {
@@ -1523,24 +1648,65 @@ normalizeLoudness.addEventListener('change', () => {
       console.log('[Normalize] Switched to original buffer');
     }
   }
-  updateAudioChain();
+  updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
   updateChecklist();
 });
 
-[truePeakLimit, cleanLowEnd, glueCompression, centerBass, cutMud, autoLevel].forEach(el => {
+[truePeakLimit, limiterCharacter, cleanLowEnd, glueCompression, centerBass, cutMud, autoLevel].forEach(el => {
   el.addEventListener('change', () => {
-    updateAudioChain();
+    updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
     updateChecklist();
   });
 });
 
 // Deharsh, Exciter (Add Air), Tape Warmth, and Multiband Transient (Add Punch) require re-processing the buffer
 // These are applied offline for preview/export parity
-[deharsh, addAir, tapeWarmth, addPunch].forEach(el => {
+[deharsh, aiEnhance, aiProfile, addAir, tapeWarmth, addPunch].forEach(el => {
   el.addEventListener('change', () => {
     processEffects();
     updateChecklist();
   });
+});
+
+aiIntensity.addEventListener('input', () => {
+  aiIntensityValue.textContent = `${aiIntensity.value}%`;
+  if (playerState.isPlaying && !playerState.isBypassed) {
+    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
+  }
+});
+
+aiIntensity.addEventListener('change', () => {
+  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  updateChecklist();
+});
+
+sibilanceProtection.addEventListener('input', () => {
+  sibilanceProtectionValue.textContent = `${sibilanceProtection.value}%`;
+  if (playerState.isPlaying && !playerState.isBypassed) {
+    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
+  }
+});
+
+sibilanceProtection.addEventListener('change', () => {
+  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  updateChecklist();
+});
+
+referenceMatch.addEventListener('change', () => {
+  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  updateChecklist();
+});
+
+referenceAmount.addEventListener('input', () => {
+  referenceAmountValue.textContent = `${referenceAmount.value}%`;
+  if (playerState.isPlaying && !playerState.isBypassed) {
+    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
+  }
+});
+
+referenceAmount.addEventListener('change', () => {
+  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  updateChecklist();
 });
 
 // truePeakSlider event listener removed - now using ceiling fader
@@ -1563,7 +1729,7 @@ stereoWidthSlider.addEventListener('input', () => {
 });
 
 stereoWidthSlider.addEventListener('change', () => {
-  updateAudioChain();
+  updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
 });
 
 // Target LUFS slider with debounced re-normalization
@@ -1637,17 +1803,23 @@ async function renormalizeAudio(newTargetLufs) {
 }
 
 targetLufsSlider.addEventListener('input', () => {
-  const newValue = parseInt(targetLufsSlider.value);
+  const newValue = parseFloat(targetLufsSlider.value);
 
   // Update display immediately
   setTargetLufs(newValue);
   targetLufsValue.textContent = `${newValue} LUFS`;
 
-  // Debounce the re-normalization (wait for user to stop sliding)
   if (lufsDebounceTimeout) {
     clearTimeout(lufsDebounceTimeout);
+    lufsDebounceTimeout = null;
   }
 
+  if (playerState.isPlaying && !playerState.isBypassed) {
+    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
+    return;
+  }
+
+  // Debounce the re-normalization (wait for user to stop sliding)
   lufsDebounceTimeout = setTimeout(() => {
     renormalizeAudio(newValue);
   }, 500); // 500ms debounce
@@ -1776,14 +1948,14 @@ initFaders({
     updateAudioChain({ scheduleCache: false });
   },
   onInputGainChangeEnd: () => {
-    updateAudioChain();
+    updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
   },
   onCeilingChange: () => {
     // Live preview updates immediately; defer cache rebuild to commit.
     updateAudioChain({ scheduleCache: false });
   },
   onCeilingChangeEnd: () => {
-    updateAudioChain();
+    updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
   },
   onEQChange: (eqVals) => {
     updateEQ();
@@ -1791,12 +1963,15 @@ initFaders({
     updateAudioChain({ scheduleCache: false });
   },
   onEQChangeEnd: () => {
-    updateAudioChain();
+    updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
   }
 });
 
 // Setup EQ presets with callback
-setupEQPresets(eqPresets, updateEQ);
+setupEQPresets(eqPresets, () => {
+  updateEQ();
+  updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
+});
 
 // Setup output format presets
 setupOutputPresets(outputPresets, () => {

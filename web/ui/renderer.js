@@ -9,9 +9,14 @@ import {
   applyExciter,
   applyTapeWarmth,
   processHybridDynamic,
+  applyDynamicLeveling,
   applyMasteringSoftClip,
   applyLookaheadLimiter,
-  applyFinalFilters
+  applyFinalFilters,
+  adjustStereoWidth,
+  applyAIGeneratedMasteringRepair,
+  applyReferenceMatch,
+  finalizeMasteringTarget
 } from '../lib/dsp/index.js';
 import { applyMultibandTransient } from '../lib/dsp/multiband-transient.js';
 import { encodeWAVAsync, createOfflineNodes } from './encoder.js';
@@ -77,6 +82,10 @@ function createRenderContext(sourceBuffer, settings, targetSampleRate) {
  */
 function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]') {
   let renderedBuffer = buffer;
+  let aiProfile = {
+    softClipDrive: 1.5,
+    maxLimiterPushDB: 1.2
+  };
 
   // 1. Deharsh / Hybrid Dynamic Processor (if enabled)
   if (settings.deharsh) {
@@ -87,11 +96,44 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   }
   if (onProgress) onProgress(0.15);
 
+  // 1.5 AI-generated / lossy-source repair
+  if (settings.aiEnhance !== false) {
+    console.log(`${logPrefix} Applying AI-source repair...`);
+    const repaired = applyAIGeneratedMasteringRepair(renderedBuffer, {
+      profile: settings.aiProfile || 'auto',
+      intensity: settings.aiIntensity ?? 1,
+      sibilanceProtection: settings.sibilanceProtection ?? 0.6
+    });
+    renderedBuffer = repaired.buffer;
+    aiProfile = repaired.profile || aiProfile;
+    if (repaired.moves) {
+      console.log(`${logPrefix} AI profile:`, aiProfile.name, 'moves:', repaired.moves);
+    }
+  }
+  if (onProgress) onProgress(0.22);
+
+  if (settings.autoLevel) {
+    console.log(`${logPrefix} Applying auto level...`);
+    renderedBuffer = applyDynamicLeveling(renderedBuffer, {
+      windowMs: 250,
+      quietThresholdDB: -42,
+      expansionRatio: 1.12,
+      maxGainDB: 3,
+      crestThresholdDB: 12,
+      attackMs: 25,
+      releaseMs: 220,
+      peakLimit: 0.9
+    }, (p) => {
+      if (onProgress) onProgress(0.22 + p * 0.04);
+    });
+  }
+  if (onProgress) onProgress(0.26);
+
   // 2. Exciter / Add Air (if enabled)
   if (settings.addAir) {
     console.log(`${logPrefix} Applying exciter...`);
     renderedBuffer = applyExciter(renderedBuffer, (p) => {
-      if (onProgress) onProgress(0.15 + p * 0.15);
+      if (onProgress) onProgress(0.26 + p * 0.04);
     });
   }
   if (onProgress) onProgress(0.30);
@@ -113,6 +155,27 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     });
   }
   if (onProgress) onProgress(0.60);
+
+  if (settings.referenceMatch && settings.referenceAnalysis) {
+    console.log(`${logPrefix} Matching reference tone...`);
+    const matched = applyReferenceMatch(renderedBuffer, settings.referenceAnalysis, {
+      amount: settings.referenceAmount ?? 0.65
+    });
+    renderedBuffer = matched.buffer;
+    if (matched.moves) {
+      console.log(`${logPrefix} Reference moves:`, matched.moves);
+    }
+  }
+
+  if (renderedBuffer.numberOfChannels === 2 && settings.aiEnhance !== false) {
+    const baseWidth = Number.isFinite(Number(settings.stereoWidth)) ? Number(settings.stereoWidth) / 100 : 1;
+    const profileWidth = aiProfile.stereoWidthScale ?? 1;
+    const effectiveWidth = Math.max(0, Math.min(2, baseWidth * profileWidth));
+    const bassFreq = aiProfile.bassMonoFreq ?? 200;
+    if (Math.abs(effectiveWidth - baseWidth) > 0.01 || (settings.centerBass && bassFreq !== 200)) {
+      renderedBuffer = adjustStereoWidth(renderedBuffer, effectiveWidth, !!settings.centerBass, bassFreq);
+    }
+  }
 
   // 5. Apply final High Cut (18kHz LPF 6dB/oct)
   // Note: HPF (Clean Low End) is already handled by the WebAudio highpass node in the offline render graph.
@@ -139,11 +202,16 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   if (settings.truePeakLimit) {
     const ceiling = settings.truePeakCeiling || -1;
     console.log(`${logPrefix} Applying mastering soft clip (ceiling:`, ceiling, 'dB)...');
+    const limiterCharacter = settings.limiterCharacter || 'balanced';
+    const limiterDriveScale = limiterCharacter === 'transparent' ? 0.85
+      : limiterCharacter === 'punch' ? 1.05
+        : limiterCharacter === 'dense' ? 1.2
+          : 1.0;
     renderedBuffer = applyMasteringSoftClip(renderedBuffer, {
       ceiling: ceiling,
       lookaheadMs: 0.5,
       releaseMs: 10,
-      drive: 1.5
+      drive: (aiProfile.softClipDrive ?? 1.5) * Math.sqrt(settings.aiIntensity ?? 1) * limiterDriveScale
     }, (p) => {
       if (onProgress) onProgress(0.75 + p * 0.15);
     });
@@ -156,6 +224,23 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     const ceilingLinear = Math.pow(10, ceiling / 20);
     console.log(`${logPrefix} Applying true peak limiter (ceiling:`, ceiling, 'dB)...');
     renderedBuffer = applyLookaheadLimiter(renderedBuffer, ceilingLinear);
+  }
+
+  if (settings.normalizeLoudness && settings.targetLufs && settings.truePeakLimit) {
+    const ceiling = settings.truePeakCeiling || -1;
+    console.log(`${logPrefix} Final loudness/peak calibration...`);
+    const calibrated = finalizeMasteringTarget(renderedBuffer, {
+      targetLufs: settings.targetLufs,
+      ceilingDB: ceiling,
+      toleranceDB: 0.15,
+      maxLimiterPushDB: (aiProfile.maxLimiterPushDB ?? 1.2) * Math.sqrt(settings.aiIntensity ?? 1) * (
+        settings.limiterCharacter === 'transparent' ? 0.75
+          : settings.limiterCharacter === 'punch' ? 1.05
+            : settings.limiterCharacter === 'dense' ? 1.25
+              : 1.0
+      )
+    });
+    renderedBuffer = calibrated.buffer;
   }
   if (onProgress) onProgress(1.0);
 

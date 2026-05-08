@@ -49,9 +49,9 @@ function softClipSample(sample, threshold, ceiling, drive, knee) {
   // Normalize excess to 0-1+ range
   const normalized = excess / range;
 
-  // Apply tanh saturation with drive
-  // tanh approaches 1 asymptotically, so output approaches ceiling
-  const saturated = Math.tanh(normalized * drive);
+  const saturated = normalized <= 1
+    ? Math.pow(normalized, drive)
+    : 1;
 
   // Map back to threshold-ceiling range
   const output = threshold + saturated * range;
@@ -175,7 +175,7 @@ export function applyMasteringSoftClip(buffer, options = {}, onProgress = null) 
   const length = buffer.length;
 
   const ceilingLin = dbToLinear(ceiling);
-  const thresholdLin = dbToLinear(ceiling + 3); // Start 3dB above ceiling
+  const thresholdLin = dbToLinear(ceiling - 3); // Start 3dB below ceiling
   const lookaheadSamples = Math.floor(sampleRate * lookaheadMs / 1000);
   const releaseCoef = Math.exp(-1 / (releaseMs * sampleRate / 1000));
 
@@ -202,7 +202,9 @@ export function applyMasteringSoftClip(buffer, options = {}, onProgress = null) 
         const excess = abs - thresholdLin;
         const range = ceilingLin - thresholdLin;
         const normalized = excess / Math.max(range, 0.001);
-        const saturated = Math.tanh(normalized * drive);
+        const saturated = normalized <= 1
+          ? Math.pow(normalized, drive)
+          : 1;
         const targetLevel = thresholdLin + saturated * range;
         const requiredGain = targetLevel / abs;
 
@@ -210,7 +212,7 @@ export function applyMasteringSoftClip(buffer, options = {}, onProgress = null) 
         const startIdx = Math.max(0, i - lookaheadSamples);
         for (let j = startIdx; j <= i; j++) {
           // Interpolate gain reduction across lookahead
-          const t = (j - startIdx) / Math.max(1, i - startIdx);
+          const t = i === startIdx ? 1 : (j - startIdx) / (i - startIdx);
           const interpolatedGain = 1.0 + (requiredGain - 1.0) * t;
           gainEnvelope[j] = Math.min(gainEnvelope[j], interpolatedGain);
         }
@@ -258,7 +260,7 @@ export function applyMasteringSoftClip(buffer, options = {}, onProgress = null) 
       // Using indices relative to current i:
       // Catmull(p1*g1, p2*g2, p3*g3, p4*g4, 0.5) -> value between p2 and p3 (i+0.5)
 
-      const sampleA = s1; // Original sample
+      const sampleA = s1; // Current sample
       const sampleB = interpolateCatmullRom(
         p1 * g1,
         p2 * g2,
@@ -281,8 +283,10 @@ export function applyMasteringSoftClip(buffer, options = {}, onProgress = null) 
       const satA = saturate(sampleA);
       const satB = saturate(sampleB);
 
-      // Downsample (Average)
-      output[i] = (satA + satB) * 0.5;
+      const oversampledPeak = Math.max(Math.abs(satA), Math.abs(satB));
+      output[i] = oversampledPeak > ceilingLin
+        ? saturate(satA * (ceilingLin / oversampledPeak))
+        : satA;
     }
 
     if (onProgress) {

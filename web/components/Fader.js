@@ -14,6 +14,7 @@ export class Fader {
       min: options.min ?? -12,
       max: options.max ?? 12,
       value: options.value ?? 0,
+      resetValue: options.resetValue ?? null,
       step: options.step ?? 0.1,
       label: options.label ?? '',
       unit: options.unit ?? 'dB',
@@ -281,7 +282,9 @@ export class Fader {
 
     // Double-click reset
     this.thumb.addEventListener('dblclick', () => {
-      const resetValue = this.options.unit === 'dB' ? 0 : (this.options.min + this.options.max) / 2;
+      const resetValue = this.options.resetValue ?? (
+        this.options.unit === 'dB' ? 0 : (this.options.min + this.options.max) / 2
+      );
       this.setValue(resetValue, true);
       this.options.onChangeEnd(this.value);
     });

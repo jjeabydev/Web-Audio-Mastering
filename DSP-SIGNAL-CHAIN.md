@@ -32,22 +32,37 @@ Meters follow the audio that is actually playing, so when FX ON is active the me
 
 This is the canonical ordering for parity (Worker path).
 
-1. Input Gain (pre-FX)
-2. Dynamic Processor (De-harsh) (optional)
-3. Exciter (Add Air) (optional)
-4. Multiband Saturation (Tape Warmth) (optional)
-5. Multiband Transient Shaper (Add Punch) (optional)
-6. Final Filters (cleanup)
+1. Input Gain (pre-FX, default -3.5 dB headroom)
+2. Dynamic Processor (De-harsh) (default enabled)
+3. AI/MP3 Source Repair (default enabled, Auto profile)
+4. Auto Level (optional)
+5. Exciter (Add Air) (optional, default disabled)
+6. Multiband Saturation (Tape Warmth) (default enabled)
+7. Multiband Transient Shaper (Add Punch) (default enabled)
+8. Reference Match (optional)
+9. Profile Stereo/Bass Mono shaping
+10. Final Filters (cleanup)
    - HPF 30 Hz (only when Clean Low End is enabled)
    - LPF 18 kHz (always)
-7. EQ (5-band) + Cut Mud (optional)
-8. Glue Compression (optional)
-9. Stereo Processing
+11. EQ (5-band) + Cut Mud (optional)
+12. Glue Compression (default enabled)
+13. Stereo Processing
    - M/S Stereo Width
    - Center Bass (mono bass below ~200 Hz) (optional)
-10. LUFS normalization (gain-only; peak control happens below) (optional)
-11. Mastering soft clipper (optional, when True Peak Limit is enabled)
-12. Lookahead true peak limiter (optional, when True Peak Limit is enabled)
+14. LUFS normalization (gain-only; default target -12 LUFS)
+15. Mastering soft clipper (when True Peak Limit is enabled)
+16. Lookahead true peak limiter (when True Peak Limit is enabled)
+17. Final target calibration (automatic when loudness + true peak are enabled)
+
+---
+
+## 0. Input Headroom
+
+**Default:** -3.5 dB
+
+**Purpose:** Gives the enhancement, clipper, and limiter stages room to work before loudness recovery. This is especially useful for Suno/MP3 sources, which often arrive already close to 0 dBFS with limited true-peak headroom.
+
+**Rationale:** Many commercial mastering flows leave a few dB of pre-chain headroom rather than driving processors at file peak. The final normalization and true-peak stages recover loudness after corrective processing.
 
 ---
 
@@ -102,7 +117,60 @@ This is the canonical ordering for parity (Worker path).
 
 ---
 
-## 2. Exciter (Add Air)
+## 2. AI/MP3 Source Repair
+
+**File:** `web/lib/dsp/ai-mastering.js`
+
+**Purpose:** Automatic corrective pass for Suno-style / AI-generated MP3 sources before enhancement stages.
+
+**Default:** ENABLED internally
+
+**Profiles:** Auto, Clean, Natural, Punchy, Loud
+
+Auto analyzes crest factor, harshness, air, sub/bass balance, and presence/body balance to select a profile. The selected profile changes repair strength, soft clipper drive, and final loudness push limit.
+
+### What It Analyzes
+
+| Area | Target Problem |
+|------|----------------|
+| Sub vs bass | Loose rumble and low-end instability |
+| 250-300 Hz | Boxy / muddy generated mix buildup |
+| 3-4 kHz | Over-forward presence and vocal edge |
+| 7-8 kHz | Harsh AI artifacts, splashy cymbals, MP3 grit |
+| 12-14 kHz | Smeared or missing "air" from lossy generation |
+
+### Corrective Moves
+
+- Adaptive HPF between ~30-42 Hz when excess sub energy is detected
+- Gentle low shelf recovery only when bass is thin relative to sub/broadband content
+- Dynamic analysis-driven cuts around 280 Hz, 3.9 kHz, and 7.8 kHz
+- Conservative high shelf trim or lift around 12.5 kHz depending on source brightness
+
+**Character:** This is intentionally corrective, not a creative EQ preset. It cleans common AI/MP3 artifacts so downstream exciter, saturation, and limiter stages work less aggressively.
+
+---
+
+## Reference Match
+
+**File:** `web/lib/dsp/ai-mastering.js` (`applyReferenceMatch`)
+
+**Purpose:** Optional reference-track matching for users who want a Suno/MP3 master to move toward a commercial song's tonal balance.
+
+**Default:** OFF until a reference is loaded and enabled
+
+### What It Matches
+
+- Low-end weight around 95 Hz
+- Mud/body balance around 280 Hz
+- Presence around 3.9 kHz
+- Harshness around 7.8 kHz
+- Air around 12.5 kHz
+
+The match amount defaults to 65% because full tonal copying can damage unrelated mixes. The reference analysis is a compact object, so it can be sent to the Web Worker and used for preview/export parity.
+
+---
+
+## 3. Exciter (Add Air)
 
 **File:** `web/lib/dsp/exciter.js`
 
@@ -128,7 +196,7 @@ This is the canonical ordering for parity (Worker path).
 
 ---
 
-## 3. Multiband Saturation (Tape Warmth)
+## 4. Multiband Saturation (Tape Warmth)
 
 **File:** `web/lib/dsp/multiband-saturation.js`
 
@@ -166,7 +234,7 @@ This is the canonical ordering for parity (Worker path).
 
 ---
 
-## 4. Multiband Transient Shaper (Add Punch)
+## 5. Multiband Transient Shaper (Add Punch)
 
 **File:** `web/lib/dsp/multiband-transient.js`
 
@@ -202,7 +270,7 @@ This is the canonical ordering for parity (Worker path).
 
 ---
 
-## 5. Final Filters
+## 6. Final Filters
 
 **File:** `web/lib/dsp/final-filters.js` (applyFinalFilters)
 
@@ -220,7 +288,7 @@ This is the canonical ordering for parity (Worker path).
 
 ---
 
-## 6. LUFS Normalization
+## 7. LUFS Normalization
 
 **File:** `web/lib/dsp/normalizer.js`, `web/lib/dsp/lufs.js`
 
@@ -250,7 +318,7 @@ This is the canonical ordering for parity (Worker path).
 
 ---
 
-## 7. Soft Clipper
+## 8. Soft Clipper
 
 **File:** `web/lib/dsp/soft-clipper.js`
 

@@ -173,9 +173,62 @@
         <div class="settings-card">
           <h3>Quick Fix <span class="live-badge">Live</span></h3>
           <label class="toggle-row"
+            data-tip="Automatic Suno/MP3 mastering repair: adapts harshness, mud, low-end cleanup, clipper drive, and final loudness behavior.">
+            <span>AI Mastering</span>
+            <input type="checkbox" id="aiEnhance" checked>
+            <span class="toggle"></span>
+          </label>
+          <div class="select-row"
+            data-tip="Auto chooses a mastering profile from the source analysis. Clean is safest, Loud is most forward.">
+            <span>Mode</span>
+            <select id="aiProfile">
+              <option value="auto" selected>Auto</option>
+              <option value="universal">Universal</option>
+              <option value="fire">Fire</option>
+              <option value="clarity">Clarity</option>
+              <option value="tape">Tape</option>
+              <option value="natural">Natural</option>
+              <option value="spatial">Spatial</option>
+              <option value="cinematic">Cinematic</option>
+              <option value="punchy">Punch</option>
+              <option value="clean">Clean</option>
+              <option value="warm">Warm</option>
+              <option value="vocal">Vocal</option>
+              <option value="bass">Bass</option>
+              <option value="loud">Loud</option>
+            </select>
+          </div>
+          <div class="slider-row" data-tip="Controls how strongly the AI mastering profile changes tone, artifact repair, and limiter behavior.">
+            <span>Intensity</span>
+            <input type="range" id="aiIntensity" min="50" max="150" step="5" value="100">
+            <span class="slider-value" id="aiIntensityValue">100%</span>
+          </div>
+          <div class="slider-row" data-tip="Controls harsh S/F sounds, splashy cymbals, and brittle AI high-frequency artifacts.">
+            <span>Sibilance</span>
+            <input type="range" id="sibilanceProtection" min="0" max="100" step="5" value="60">
+            <span class="slider-value" id="sibilanceProtectionValue">60%</span>
+          </div>
+          <label class="toggle-row"
+            data-tip="Match tonal balance and loudness behavior toward a loaded reference track.">
+            <span>Reference Match</span>
+            <input type="checkbox" id="referenceMatch">
+            <span class="toggle"></span>
+          </label>
+          <div class="reference-row">
+            <button id="selectReference" class="mini-btn" type="button">Ref</button>
+            <span id="referenceName" class="reference-name">No reference</span>
+            <button id="clearReference" class="mini-btn ghost" type="button">Clear</button>
+            <input type="file" id="referenceInput" accept="audio/*,.mp3,.wav,.flac,.aac,.m4a,.mp4" hidden>
+          </div>
+          <div class="slider-row" data-tip="How strongly to follow the reference. Keep below 80% for safer mastering.">
+            <span>Match</span>
+            <input type="range" id="referenceAmount" min="0" max="100" step="5" value="65">
+            <span class="slider-value" id="referenceAmountValue">65%</span>
+          </div>
+          <label class="toggle-row"
             data-tip="Multiband compression to glue the mix together with balanced frequency control.">
             <span>Glue Compression</span>
-            <input type="checkbox" id="glueCompression">
+            <input type="checkbox" id="glueCompression" checked>
             <span class="toggle"></span>
           </label>
           <label class="toggle-row"
@@ -225,7 +278,7 @@
           </label>
           <label class="toggle-row" data-tip="Adds sparkle and brightness with a 12kHz high shelf boost.">
             <span>Add Air</span>
-            <input type="checkbox" id="addAir" checked>
+            <input type="checkbox" id="addAir">
             <span class="toggle"></span>
           </label>
           <label class="toggle-row" data-tip="Adds subtle tape-style saturation for analog warmth.">
@@ -238,10 +291,10 @@
         <div class="settings-card">
           <h3>Output</h3>
           <div class="output-presets">
-            <button class="output-preset-btn" data-preset="streaming"
+            <button class="output-preset-btn active" data-preset="streaming"
               data-tip="48kHz/24-bit - Optimal for streaming platforms (DistroKid, TuneCore, Spotify)">Streaming</button>
-            <button class="output-preset-btn active" data-preset="studio"
-              data-tip="48kHz/24-bit - Studio quality, video production">Studio</button>
+            <button class="output-preset-btn" data-preset="cd"
+              data-tip="44.1kHz/16-bit - CD-compatible WAV with dither">CD</button>
           </div>
           <div class="select-row"
             data-tip="48kHz is preferred by distributors. Better quality through encoding pipelines.">
@@ -273,28 +326,38 @@
           <h3>Loudness <span class="live-badge">Live</span></h3>
           <div class="loudness-faders">
             <div id="inputGainFader" class="fader-container"
-              data-tip="Adjust input level before processing. Double-click to reset to 0dB."></div>
+              data-tip="Adjust input level before processing. Default -3.5dB leaves mastering headroom."></div>
             <div id="ceilingFader" class="fader-container"
               data-tip="Maximum peak level. -1dB is standard for streaming."></div>
           </div>
           <div class="loudness-toggles">
             <label class="toggle-row"
-              data-tip="Normalize loudness to target LUFS. -14 for Spotify, -9 for louder masters.">
+              data-tip="Normalize loudness to target LUFS. -12 is the default commercial-style balance; -14 is streaming-normalized.">
               <span>Normalize Loudness</span>
               <input type="checkbox" id="normalizeLoudness" checked>
               <span class="toggle"></span>
             </label>
             <div class="slider-row target-lufs-row"
-              data-tip="Target loudness: -16 (quiet) to -6 (loud). -14 is Spotify standard, -9 is typical for modern masters.">
+              data-tip="Target loudness: -16 (quiet) to -6 (loud). -12 is a balanced commercial-style default; -14 is streaming-normalized.">
               <span>Target</span>
-              <input type="range" id="targetLufs" min="-16" max="-6" step="0.5" value="-14">
-              <span class="slider-value" id="targetLufsValue">-14 LUFS</span>
+              <input type="range" id="targetLufs" min="-16" max="-6" step="0.5" value="-12">
+              <span class="slider-value" id="targetLufsValue">-12 LUFS</span>
             </div>
             <label class="toggle-row" data-tip="Prevents audio from clipping by limiting peaks to the ceiling value.">
               <span>True Peak Limit</span>
               <input type="checkbox" id="truePeakLimit" checked>
               <span class="toggle"></span>
             </label>
+            <div class="select-row"
+              data-tip="Limiter character changes how hard the final maximizer pushes loudness and transients.">
+              <span>Limiter</span>
+              <select id="limiterCharacter">
+                <option value="transparent">Transparent</option>
+                <option value="balanced" selected>Balanced</option>
+                <option value="punch">Punch</option>
+                <option value="dense">Dense</option>
+              </select>
+            </div>
           </div>
         </div>
 
