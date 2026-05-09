@@ -163,7 +163,7 @@ export function showOriginalWaveform() {
  */
 export function extractPeaks(audioBuffer, numPeaks = 800) {
   const channelData = audioBuffer.getChannelData(0);
-  const samplesPerPeak = Math.floor(channelData.length / numPeaks);
+  const samplesPerPeak = Math.max(1, Math.floor(channelData.length / numPeaks));
   const peaks = [];
 
   for (let i = 0; i < numPeaks; i++) {
@@ -175,6 +175,36 @@ export function extractPeaks(audioBuffer, numPeaks = 800) {
       if (abs > max) max = abs;
     }
     peaks.push(max);
+  }
+
+  return peaks;
+}
+
+export function extractWaveformPeaks(audioBuffer, numPeaks = 1200, gain = 1) {
+  if (!audioBuffer) return null;
+
+  const channelCount = Math.min(2, audioBuffer.numberOfChannels);
+  const samplesPerPeak = Math.max(1, Math.floor(audioBuffer.length / numPeaks));
+  const peaks = [];
+
+  for (let ch = 0; ch < channelCount; ch++) {
+    const channelData = audioBuffer.getChannelData(ch);
+    const channelPeaks = [];
+
+    for (let i = 0; i < numPeaks; i++) {
+      const start = i * samplesPerPeak;
+      const end = Math.min(start + samplesPerPeak, channelData.length);
+      let max = 0;
+
+      for (let j = start; j < end; j++) {
+        const abs = Math.abs(channelData[j] * gain);
+        if (abs > max) max = abs;
+      }
+
+      channelPeaks.push(Math.max(-1, Math.min(1, max)));
+    }
+
+    peaks.push(channelPeaks);
   }
 
   return peaks;
@@ -325,6 +355,20 @@ export function updateWaveformBuffer(audioBuffer) {
   wavesurfer.load(currentBlobUrl);
 
   console.log('[Waveform] Updated with new buffer, duration:', audioBuffer.duration);
+}
+
+export function updateWaveformPeaks(audioBuffer, options = {}) {
+  if (!wavesurfer || !audioBuffer) return;
+
+  const peaks = extractWaveformPeaks(
+    audioBuffer,
+    options.numPeaks || 1200,
+    options.gain ?? 1
+  );
+
+  if (!peaks) return;
+  wavesurfer.load('', peaks, audioBuffer.duration);
+  console.log('[Waveform] Updated live peaks, duration:', audioBuffer.duration);
 }
 
 /**

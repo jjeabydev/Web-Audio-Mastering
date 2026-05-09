@@ -251,6 +251,49 @@ function bandRms(mono, sampleRate, frequency, Q) {
   return calculateRMS(applyBiquadFilter(mono, coeffs));
 }
 
+function analyzeStereoImage(buffer) {
+  if (buffer.numberOfChannels < 2) {
+    return {
+      correlation: 1,
+      sideToMidDB: -60,
+      sideEnergy: 0,
+      midEnergy: 0
+    };
+  }
+
+  const left = buffer.getChannelData(0);
+  const right = buffer.getChannelData(1);
+  let sumLR = 0;
+  let sumL2 = 0;
+  let sumR2 = 0;
+  let sumMid2 = 0;
+  let sumSide2 = 0;
+
+  for (let i = 0; i < left.length; i += 17) {
+    const l = left[i];
+    const r = right[i];
+    const mid = (l + r) * 0.5;
+    const side = (l - r) * 0.5;
+    sumLR += l * r;
+    sumL2 += l * l;
+    sumR2 += r * r;
+    sumMid2 += mid * mid;
+    sumSide2 += side * side;
+  }
+
+  const correlationDenominator = Math.sqrt(sumL2 * sumR2);
+  const correlation = correlationDenominator > 0 ? sumLR / correlationDenominator : 1;
+  const midEnergy = Math.sqrt(sumMid2);
+  const sideEnergy = Math.sqrt(sumSide2);
+
+  return {
+    correlation: clamp(correlation, -1, 1),
+    sideToMidDB: linearToDb((sideEnergy + 1e-9) / (midEnergy + 1e-9)),
+    sideEnergy,
+    midEnergy
+  };
+}
+
 export function analyzeAIGeneratedMastering(buffer) {
   const mono = downmixMono(buffer);
   const fullRms = calculateRMS(mono);
@@ -269,24 +312,29 @@ export function analyzeAIGeneratedMastering(buffer) {
     body: bandRms(mono, buffer.sampleRate, 900, 0.9),
     presence: bandRms(mono, buffer.sampleRate, 3800, 1.0),
     harsh: bandRms(mono, buffer.sampleRate, 7800, 1.4),
+    metallic: bandRms(mono, buffer.sampleRate, 10800, 2.8),
     air: bandRms(mono, buffer.sampleRate, 13500, 0.8)
   };
 
   const toFullDB = value => linearToDb((value + 1e-9) / (fullRms + 1e-9));
   const mudDB = toFullDB(bands.mud);
   const harshDB = toFullDB(bands.harsh);
+  const metallicDB = toFullDB(bands.metallic);
   const airDB = toFullDB(bands.air);
   const subToBassDB = linearToDb((bands.sub + 1e-9) / (bands.bass + 1e-9));
   const presenceToBodyDB = linearToDb((bands.presence + 1e-9) / (bands.body + 1e-9));
+  const stereo = analyzeStereoImage(buffer);
 
   return {
     fullRms,
     peak,
     crestDB,
     bands,
+    stereo,
     profile: {
       mudDB,
       harshDB,
+      metallicDB,
       airDB,
       subToBassDB,
       presenceToBodyDB
@@ -317,15 +365,23 @@ export function chooseAIMasteringProfile(analysis, requestedProfile = 'auto') {
 }
 
 export function getAIGeneratedMasteringMoves(analysis, strength = 1, profile = AI_MASTERING_PROFILES.universal, options = {}) {
-  const { mudDB, harshDB, airDB, subToBassDB, presenceToBodyDB } = analysis.profile;
+  const { mudDB, harshDB, metallicDB = -18, airDB, subToBassDB, presenceToBodyDB } = analysis.profile;
   const tone = profile.tone || {};
   const sibilanceAmount = clamp(options.sibilanceProtection ?? 0.6, 0, 1);
+  const artifactAmount = clamp(options.artifactProtection ?? 0.7, 0, 1);
   const lowCutFreq = clamp(30 + Math.max(0, subToBassDB + 1) * 4, 30, 42);
   const mudCut = clamp((-clamp((mudDB + 10) * 0.35, 0, 2.8) + (tone.mud || 0)) * strength, -3.2, 0.6);
   const presenceCut = clamp((-clamp((presenceToBodyDB + 1.5) * 0.4, 0, 2.2) + (tone.presence || 0)) * strength, -2.8, 0.9);
   const sibilanceCut = -clamp((harshDB + 15) * 0.28 + sibilanceAmount * 1.15, 0.4, 3.4) * strength;
   const harshCut = clamp((-clamp((harshDB + 13) * 0.55, 0.4, 3.5) + (tone.harsh || 0) + sibilanceCut * 0.35) * strength, -4.8, -0.15);
-  const airShelf = clamp((clamp((-18 - airDB) * 0.16, -1.2, 1.2) + (tone.air || 0)) * strength, -1.8, 1.6);
+  const metallicExcess = clamp((metallicDB + 17) * 0.16, 0, 1.45);
+  const metallicBase = clamp(
+    0.12 + metallicExcess + artifactAmount * 1.55 + Math.max(0, harshDB + 13) * 0.06,
+    0.1,
+    3.2
+  );
+  const metallicCut = -clamp(metallicBase * strength, 0.1, 4.2);
+  const airShelf = clamp((clamp((-18 - airDB) * 0.16, -1.2, 1.2) + (tone.air || 0) + metallicCut * 0.08) * strength, -1.8, 1.4);
   const bassLift = clamp((clamp((-3 - subToBassDB) * 0.18, 0, 1.2) + (tone.bass || 0)) * strength, -0.8, 1.8);
 
   return {
@@ -335,6 +391,7 @@ export function getAIGeneratedMasteringMoves(analysis, strength = 1, profile = A
     presenceCut,
     harshCut,
     sibilanceCut,
+    metallicCut,
     airShelf
   };
 }
@@ -350,7 +407,8 @@ export function applyAIGeneratedMasteringRepair(buffer, options = {}) {
   }
 
   const moves = getAIGeneratedMasteringMoves(analysis, strength, profile, {
-    sibilanceProtection: options.sibilanceProtection
+    sibilanceProtection: options.sibilanceProtection,
+    artifactProtection: options.artifactProtection
   });
   let output = buffer;
 
@@ -361,6 +419,8 @@ export function applyAIGeneratedMasteringRepair(buffer, options = {}) {
   output = applyFilterToBuffer(output, 'peaking', 6200, moves.sibilanceCut, 2.3);
   output = applyFilterToBuffer(output, 'peaking', 9200, moves.sibilanceCut * 0.55, 2.0);
   output = applyFilterToBuffer(output, 'peaking', 7800, moves.harshCut, 1.6);
+  output = applyFilterToBuffer(output, 'peaking', 10800, moves.metallicCut, 3.2);
+  output = applyFilterToBuffer(output, 'peaking', 11800, moves.metallicCut * 0.45, 2.4);
   output = applyFilterToBuffer(output, 'highshelf', 12500, moves.airShelf, 0.75);
 
   return { buffer: output, analysis, moves, profile };
@@ -402,6 +462,100 @@ export function applyReferenceMatch(buffer, referenceAnalysis, options = {}) {
       presenceMatch,
       harshMatch,
       airMatch
+    }
+  };
+}
+
+export function applyLimiterStressGuard(buffer, options = {}) {
+  const amount = clamp(options.amount ?? 1, 0, 1.5);
+  if (amount <= 0) {
+    return { buffer, analysis: analyzeAIGeneratedMastering(buffer), moves: null };
+  }
+
+  const analysis = analyzeAIGeneratedMastering(buffer);
+  const { mudDB, harshDB, metallicDB = -18, airDB, subToBassDB, presenceToBodyDB } = analysis.profile;
+  const targetLufs = options.targetLufs ?? -12;
+  const loudnessPressure = clamp((-12 - targetLufs) * 0.16 + (options.intensity ?? 1) * 0.18, 0.08, 0.55);
+
+  const lowStress = clamp((subToBassDB + 2.5) * 0.18 + loudnessPressure, 0, 1.2) * amount;
+  const mudStress = clamp((mudDB + 9.5) * 0.22 + loudnessPressure * 0.55, 0, 1.4) * amount;
+  const presenceStress = clamp((presenceToBodyDB + 1.0) * 0.28 + loudnessPressure * 0.65, 0, 1.6) * amount;
+  const harshStress = clamp((harshDB + 13.5) * 0.26 + loudnessPressure * 0.7, 0, 1.8) * amount;
+  const metallicStress = clamp((metallicDB + 17.5) * 0.18 + loudnessPressure * 0.8, 0, 1.7) * amount;
+  const airStress = clamp((airDB + 14.5) * 0.14 + loudnessPressure * 0.35, 0, 1.0) * amount;
+
+  const moves = {
+    lowShelf: -clamp(lowStress, 0, 1.2),
+    mudCut: -clamp(mudStress, 0, 1.4),
+    presenceCut: -clamp(presenceStress, 0, 1.6),
+    harshCut: -clamp(harshStress, 0, 1.8),
+    metallicCut: -clamp(metallicStress, 0, 1.7),
+    airShelf: -clamp(airStress, 0, 1.0)
+  };
+
+  let output = buffer;
+  output = applyFilterToBuffer(output, 'lowshelf', 90, moves.lowShelf, 0.7);
+  output = applyFilterToBuffer(output, 'peaking', 260, moves.mudCut, 1.0);
+  output = applyFilterToBuffer(output, 'peaking', 3600, moves.presenceCut, 1.15);
+  output = applyFilterToBuffer(output, 'peaking', 7600, moves.harshCut, 1.8);
+  output = applyFilterToBuffer(output, 'peaking', 10800, moves.metallicCut, 3.0);
+  output = applyFilterToBuffer(output, 'highshelf', 14000, moves.airShelf, 0.75);
+
+  return { buffer: output, analysis, moves };
+}
+
+export function applyStereoStabilityGuard(buffer, options = {}) {
+  if (buffer.numberOfChannels < 2) {
+    return { buffer, analysis: analyzeAIGeneratedMastering(buffer), moves: null };
+  }
+
+  const amount = clamp(options.amount ?? 1, 0, 1.5);
+  if (amount <= 0) {
+    return { buffer, analysis: analyzeAIGeneratedMastering(buffer), moves: null };
+  }
+
+  const analysis = analyzeAIGeneratedMastering(buffer);
+  const { correlation, sideToMidDB } = analysis.stereo;
+  const widthExcess = clamp((sideToMidDB + 5) / 8, 0, 1);
+  const phaseRisk = clamp((0.12 - correlation) / 0.5, 0, 1);
+  const risk = clamp(widthExcess * 0.65 + phaseRisk * 0.75, 0, 1);
+
+  if (risk < 0.08) {
+    return { buffer, analysis, moves: { sideScale: 1, bassMonoFreq: 0, risk } };
+  }
+
+  const sideScale = clamp(1 - risk * 0.18 * amount, 0.78, 1);
+  const bassMonoFreq = clamp(170 + risk * 90, 170, 260);
+  const sideHighpass = calcBiquadCoeffs('highpass', buffer.sampleRate, bassMonoFreq, 0, 0.707);
+
+  const output = createBufferLike(buffer);
+  const left = buffer.getChannelData(0);
+  const right = buffer.getChannelData(1);
+  const mid = new Float32Array(buffer.length);
+  const side = new Float32Array(buffer.length);
+
+  for (let i = 0; i < buffer.length; i++) {
+    mid[i] = (left[i] + right[i]) * 0.5;
+    side[i] = (left[i] - right[i]) * 0.5;
+  }
+
+  const stableSide = applyBiquadFilter(side, sideHighpass);
+  const outLeft = output.getChannelData(0);
+  const outRight = output.getChannelData(1);
+
+  for (let i = 0; i < buffer.length; i++) {
+    const s = stableSide[i] * sideScale;
+    outLeft[i] = mid[i] + s;
+    outRight[i] = mid[i] - s;
+  }
+
+  return {
+    buffer: output,
+    analysis,
+    moves: {
+      sideScale,
+      bassMonoFreq,
+      risk
     }
   };
 }

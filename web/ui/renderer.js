@@ -16,6 +16,8 @@ import {
   adjustStereoWidth,
   applyAIGeneratedMasteringRepair,
   applyReferenceMatch,
+  applyLimiterStressGuard,
+  applyStereoStabilityGuard,
   finalizeMasteringTarget
 } from '../lib/dsp/index.js';
 import { applyMultibandTransient } from '../lib/dsp/multiband-transient.js';
@@ -102,7 +104,8 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     const repaired = applyAIGeneratedMasteringRepair(renderedBuffer, {
       profile: settings.aiProfile || 'auto',
       intensity: settings.aiIntensity ?? 1,
-      sibilanceProtection: settings.sibilanceProtection ?? 0.6
+      sibilanceProtection: settings.sibilanceProtection ?? 0.6,
+      artifactProtection: settings.artifactProtection ?? 0.7
     });
     renderedBuffer = repaired.buffer;
     aiProfile = repaired.profile || aiProfile;
@@ -168,6 +171,17 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   }
 
   if (renderedBuffer.numberOfChannels === 2 && settings.aiEnhance !== false) {
+    console.log(`${logPrefix} Stabilizing AI stereo image...`);
+    const stereoGuarded = applyStereoStabilityGuard(renderedBuffer, {
+      amount: settings.aiIntensity ?? 1
+    });
+    renderedBuffer = stereoGuarded.buffer;
+    if (stereoGuarded.moves) {
+      console.log(`${logPrefix} Stereo guard moves:`, stereoGuarded.moves);
+    }
+  }
+
+  if (renderedBuffer.numberOfChannels === 2 && settings.aiEnhance !== false) {
     const baseWidth = Number.isFinite(Number(settings.stereoWidth)) ? Number(settings.stereoWidth) / 100 : 1;
     const profileWidth = aiProfile.stereoWidthScale ?? 1;
     const effectiveWidth = Math.max(0, Math.min(2, baseWidth * profileWidth));
@@ -197,6 +211,24 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     renderedBuffer = normalizeToLUFS(renderedBuffer, settings.targetLufs, 0, { skipLimiter: true });
   }
   if (onProgress) onProgress(0.75);
+
+  if (settings.truePeakLimit && settings.aiEnhance !== false) {
+    console.log(`${logPrefix} Applying limiter stress guard...`);
+    const limiterCharacter = settings.limiterCharacter || 'balanced';
+    const guardAmount = limiterCharacter === 'transparent' ? 0.65
+      : limiterCharacter === 'punch' ? 0.9
+        : limiterCharacter === 'dense' ? 1.15
+          : 0.85;
+    const guarded = applyLimiterStressGuard(renderedBuffer, {
+      amount: guardAmount,
+      targetLufs: settings.targetLufs ?? -12,
+      intensity: settings.aiIntensity ?? 1
+    });
+    renderedBuffer = guarded.buffer;
+    if (guarded.moves) {
+      console.log(`${logPrefix} Limiter guard moves:`, guarded.moves);
+    }
+  }
 
   // 8. Soft Clipper (reduces peak-to-loudness ratio before limiting)
   if (settings.truePeakLimit) {

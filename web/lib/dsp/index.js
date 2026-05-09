@@ -184,5 +184,7 @@ export {
   getAIGeneratedMasteringMoves,
   applyAIGeneratedMasteringRepair,
   applyReferenceMatch,
+  applyLimiterStressGuard,
+  applyStereoStabilityGuard,
   finalizeMasteringTarget
 } from './ai-mastering.js';

@@ -29,6 +29,8 @@ import {
   applyLookaheadLimiter,
   applyAIGeneratedMasteringRepair,
   applyReferenceMatch,
+  applyLimiterStressGuard,
+  applyStereoStabilityGuard,
   finalizeMasteringTarget
 } from '../lib/dsp/index.js';
 
@@ -1524,7 +1526,8 @@ self.onmessage = async (e) => {
           const repaired = applyAIGeneratedMasteringRepair(buffer, {
             profile: settings.aiProfile || 'auto',
             intensity: settings.aiIntensity ?? 1,
-            sibilanceProtection: settings.sibilanceProtection ?? 0.6
+            sibilanceProtection: settings.sibilanceProtection ?? 0.6,
+            artifactProtection: settings.artifactProtection ?? 0.7
           });
           buffer = repaired.buffer;
           aiProfile = repaired.profile || aiProfile;
@@ -1578,6 +1581,17 @@ self.onmessage = async (e) => {
           buffer = matched.buffer;
           if (matched.moves) {
             console.log('[Worker Chain] Reference moves:', matched.moves);
+          }
+        }
+
+        if (buffer.numberOfChannels === 2 && settings.aiEnhance !== false) {
+          sendProgress(id, 0.59, 'Stabilizing stereo image...');
+          const stereoGuarded = applyStereoStabilityGuard(buffer, {
+            amount: settings.aiIntensity ?? 1
+          });
+          buffer = stereoGuarded.buffer;
+          if (stereoGuarded.moves) {
+            console.log('[Worker Chain] Stereo guard moves:', stereoGuarded.moves);
           }
         }
 
@@ -1661,6 +1675,24 @@ self.onmessage = async (e) => {
           const targetLufs = settings.targetLufs;
           // Apply Gain (No Limiting yet, skipLimiter: true)
           buffer = normalizeToLUFS(buffer, targetLufs, 0, { skipLimiter: true });
+        }
+
+        if (settings.truePeakLimit && settings.aiEnhance !== false) {
+          sendProgress(id, 0.82, 'Protecting limiter clarity...');
+          const limiterCharacter = settings.limiterCharacter || 'balanced';
+          const guardAmount = limiterCharacter === 'transparent' ? 0.65
+            : limiterCharacter === 'punch' ? 0.9
+              : limiterCharacter === 'dense' ? 1.15
+                : 0.85;
+          const guarded = applyLimiterStressGuard(buffer, {
+            amount: guardAmount,
+            targetLufs: settings.targetLufs ?? -12,
+            intensity: settings.aiIntensity ?? 1
+          });
+          buffer = guarded.buffer;
+          if (guarded.moves) {
+            console.log('[Worker Chain] Limiter guard moves:', guarded.moves);
+          }
         }
 
         // 9. Soft Clipper

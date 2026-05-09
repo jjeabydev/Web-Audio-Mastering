@@ -173,11 +173,24 @@
 
       <div class="assistant-bar">
         <div class="assistant-presets" aria-label="Mastering presets">
-          <button class="assistant-preset" type="button" data-mastering-preset="manual">Manual</button>
-          <button class="assistant-preset active" type="button" data-mastering-preset="ai-auto">AI Auto</button>
-          <button class="assistant-preset" type="button" data-mastering-preset="ai-clean">AI Clean</button>
-          <button class="assistant-preset" type="button" data-mastering-preset="ai-loud">AI Loud</button>
-          <button class="assistant-preset" type="button" data-mastering-preset="reference">Match Ref</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="manual"
+            data-tip="Turns off automatic AI mastering and reference matching. Use this when you want to shape the master manually in Advanced mode.">Manual</button>
+          <button class="assistant-preset active" type="button" data-mastering-preset="ai-auto"
+            data-tip="Best starting point. Upload a song, press Play, then export if it already sounds right.">AI Auto</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="ai-clean"
+            data-tip="Use when the master feels harsh, crowded, or too processed. Cleaner and safer than AI Loud.">AI Clean</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="ai-loud"
+            data-tip="Use when you want a louder, more forward commercial master. If it distorts, switch back to AI Auto or AI Clean.">AI Loud</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="reference"
+            data-tip="Load a commercial song you like. The master will move toward that track's tonal balance and loudness character.">Match Ref</button>
+          <button class="assistant-preset custom-state hidden" type="button" data-mastering-preset="custom"
+            data-tip="You changed detailed controls after choosing a preset. AI Mastering is still active; this is your custom version.">Custom</button>
+        </div>
+        <div class="quick-guide" data-tip="Quick flow: upload a song, keep AI Auto, press Play, adjust Metallic/Sibilance only if needed, then Export WAV.">
+          <span class="guide-step">1 Upload</span>
+          <span class="guide-step">2 Play</span>
+          <span class="guide-step">3 Tune</span>
+          <span class="guide-step">4 Export</span>
         </div>
         <label class="advanced-toggle" data-tip="Show detailed mastering controls. Simple mode keeps commercial-style safe defaults active.">
           <input type="checkbox" id="advancedMode">
@@ -189,6 +202,9 @@
       <div class="panel-grid">
         <div class="settings-card">
           <h3>Quick Fix <span class="live-badge">Live</span></h3>
+          <div class="control-help">
+            Start with AI Auto. If high notes sound robotic, raise Metallic. If vocal S sounds are sharp, raise Sibilance.
+          </div>
           <label class="toggle-row"
             data-tip="Automatic AI/MP3 mastering repair: adapts harshness, mud, low-end cleanup, clipper drive, and final loudness behavior.">
             <span>AI Mastering</span>
@@ -224,6 +240,14 @@
             <span>Sibilance</span>
             <input type="range" id="sibilanceProtection" min="0" max="100" step="5" value="65">
             <span class="slider-value" id="sibilanceProtectionValue">65%</span>
+          </div>
+          <div class="slider-row" data-tip="If high notes sound robotic, metallic, glassy, or chirpy, raise this first. Try 70-80% before changing EQ.">
+            <span>Metallic</span>
+            <input type="range" id="artifactProtection" min="0" max="100" step="5" value="70">
+            <span class="slider-value" id="artifactProtectionValue">70%</span>
+          </div>
+          <div class="control-help">
+            Robotic highs: keep Metallic around 70-80%. If S/T sounds are sharp, raise Sibilance. If it gets dull, lower Intensity or use AI Clean.
           </div>
           <label class="toggle-row"
             data-tip="Match tonal balance and loudness behavior toward a loaded reference track.">
@@ -274,12 +298,15 @@
 
         <div class="settings-card advanced-control">
           <h3>Stereo <span class="live-badge">Live</span></h3>
-          <div class="slider-row" data-tip="Stereo width: 0% = mono, 100% = original, 200% = extra wide.">
+          <div class="control-help">
+            Keep Width near 100% for most tracks. If the vocal disappears in mono, lower Width. Keep Mono Bass on unless the low end feels too narrow.
+          </div>
+          <div class="slider-row" data-tip="Use 90-110% for most masters. Try 120-130% only when the song feels too centered; avoid extreme width for bass-heavy music.">
             <span>Width</span>
             <input type="range" id="stereoWidth" min="0" max="200" step="5" value="100">
             <span class="slider-value" id="stereoWidthValue">100%</span>
           </div>
-          <label class="toggle-row" data-tip="Narrows bass below ~200Hz for better club/speaker mono compatibility.">
+          <label class="toggle-row" data-tip="Leave on for streaming and club translation. Turn off only if the mix already has intentionally wide low-end effects.">
             <span>Mono Bass</span>
             <input type="checkbox" id="centerBass" checked>
             <span class="toggle"></span>
@@ -288,17 +315,20 @@
 
         <div class="settings-card advanced-control">
           <h3>Polish <span class="live-badge">Live</span></h3>
-          <label class="toggle-row" data-tip="Reduces muddy frequencies around 250Hz for clarity.">
+          <div class="control-help">
+            Use these after AI Auto sounds close. If the song is cloudy, use Cut Mud. If it is dull, try Add Air. If it is thin or cold, keep Tape Warmth on.
+          </div>
+          <label class="toggle-row" data-tip="Use when vocals, piano, or guitars feel covered by low-mid fog. Turn off if the master becomes too thin.">
             <span>Cut Mud</span>
             <input type="checkbox" id="cutMud">
             <span class="toggle"></span>
           </label>
-          <label class="toggle-row" data-tip="Adds sparkle and brightness with a 12kHz high shelf boost.">
+          <label class="toggle-row" data-tip="Use when the master lacks sparkle. Avoid it if Metallic or Sibilance is already high, because it can reveal AI artifacts.">
             <span>Add Air</span>
             <input type="checkbox" id="addAir">
             <span class="toggle"></span>
           </label>
-          <label class="toggle-row" data-tip="Adds subtle tape-style saturation for analog warmth.">
+          <label class="toggle-row" data-tip="Usually safe on. Turn off if drums lose snap or the master sounds too soft.">
             <span>Tape Warmth</span>
             <input type="checkbox" id="tapeWarmth" checked>
             <span class="toggle"></span>
@@ -307,21 +337,24 @@
 
         <div class="settings-card">
           <h3>Output</h3>
+          <div class="control-help">
+            Use Streaming for uploads/distribution. Use CD only for 44.1kHz/16-bit delivery. For MP3 source files, 48kHz/24-bit is still the safer export container.
+          </div>
           <div class="output-presets">
             <button class="output-preset-btn active" data-preset="streaming"
-              data-tip="48kHz/24-bit - Optimal for streaming platforms (DistroKid, TuneCore, Spotify)">Streaming</button>
+              data-tip="Recommended default. Exports a 48kHz/24-bit WAV that gives encoders more room than 16-bit delivery.">Streaming</button>
             <button class="output-preset-btn" data-preset="cd"
-              data-tip="44.1kHz/16-bit - CD-compatible WAV with dither">CD</button>
+              data-tip="Use only when a client, distributor, or CD workflow specifically asks for 44.1kHz/16-bit.">CD</button>
           </div>
           <div class="select-row advanced-control"
-            data-tip="48kHz is preferred by distributors. Better quality through encoding pipelines.">
+            data-tip="Keep 48kHz for modern distribution. Choose 44.1kHz only for CD-style delivery or exact compatibility requirements.">
             <span>Sample Rate</span>
             <select id="sampleRate">
               <option value="44100">44.1 kHz</option>
               <option value="48000" selected>48 kHz</option>
             </select>
           </div>
-          <div class="select-row advanced-control" data-tip="24-bit preferred by distributors. More headroom through encoding.">
+          <div class="select-row advanced-control" data-tip="Keep 24-bit unless you need CD. 16-bit should use dither.">
             <span>Bit Depth</span>
             <select id="bitDepth">
               <option value="16">16-bit</option>
@@ -329,7 +362,7 @@
             </select>
           </div>
           <label class="toggle-row advanced-control" id="ditherNoiseShapingRow"
-            data-tip="16-bit only: shapes dither noise toward higher frequencies for cleaner low-level detail.">
+            data-tip="Enable for 16-bit exports. It is not needed for 24-bit streaming exports.">
             <span>Noise-Shaped Dither</span>
             <input type="checkbox" id="ditherNoiseShaping">
             <span class="toggle"></span>
@@ -341,32 +374,35 @@
       <div class="eq-row">
         <div class="settings-card loudness-card">
           <h3>Loudness <span class="live-badge">Live</span></h3>
+          <div class="control-help">
+            Use -12 LUFS for a loud modern master, -14 for safer streaming, and -9 only when you want aggressive loudness. If the master pumps or distorts, lower Target or choose a softer Limiter.
+          </div>
           <div class="loudness-faders">
             <div id="inputGainFader" class="fader-container"
-              data-tip="Adjust input level before processing. Default -3.5dB leaves mastering headroom."></div>
+              data-tip="If the source is already loud or clipped, lower Input to -5 or -6dB. If it is very quiet, raise it gently, but avoid red clipping."></div>
             <div id="ceilingFader" class="fader-container"
-              data-tip="Maximum peak level. -1dB is standard for streaming."></div>
+              data-tip="Keep -1dB for MP3/AAC safety. Use -0.3dB only for high-quality WAV delivery where loudness matters more than codec safety."></div>
           </div>
           <div class="loudness-toggles">
             <label class="toggle-row"
-              data-tip="Normalize loudness to target LUFS. -12 is the default commercial-style balance; -14 is streaming-normalized.">
+              data-tip="Leave on for automatic mastering. Turn off only when you want to preserve the original loudness and use manual gain.">
               <span>Normalize Loudness</span>
               <input type="checkbox" id="normalizeLoudness" checked>
               <span class="toggle"></span>
             </label>
             <div class="slider-row target-lufs-row"
-              data-tip="Target loudness: -16 (quiet) to -6 (loud). -12 is a balanced commercial-style default; -14 is streaming-normalized.">
+              data-tip="Raise for louder masters, lower for cleaner dynamics. If high notes become crunchy, try -13 or -14 instead of pushing Metallic too hard.">
               <span>Target</span>
               <input type="range" id="targetLufs" min="-16" max="-6" step="0.5" value="-12">
               <span class="slider-value" id="targetLufsValue">-12 LUFS</span>
             </div>
-            <label class="toggle-row" data-tip="Prevents audio from clipping by limiting peaks to the ceiling value.">
+            <label class="toggle-row" data-tip="Leave on for release-ready exports. Turn off only for testing, because clipping can happen after export.">
               <span>True Peak Limit</span>
               <input type="checkbox" id="truePeakLimit" checked>
               <span class="toggle"></span>
             </label>
             <div class="select-row"
-              data-tip="Limiter character changes how hard the final maximizer pushes loudness and transients.">
+              data-tip="Transparent is safest, Balanced is default, Punch keeps drums forward, Dense is loudest but can reveal distortion on weak sources.">
               <span>Limiter</span>
               <select id="limiterCharacter">
                 <option value="transparent">Transparent</option>
@@ -381,6 +417,9 @@
         <!-- 5-Band EQ -->
         <div class="eq-section advanced-control">
           <h3>EQ <span class="live-badge">Live</span></h3>
+          <div class="control-help">
+            Leave EQ Flat first. Use small moves only. If you need more than 2-3dB, switch AI mode or Reference Match before forcing EQ.
+          </div>
           <div class="eq-bands">
             <div class="eq-band" id="eqLowFader" data-tip="Low shelf at 80Hz"></div>
             <div class="eq-band" id="eqLowMidFader" data-tip="Peak at 250Hz"></div>
@@ -389,12 +428,12 @@
             <div class="eq-band" id="eqHighFader" data-tip="High shelf at 12kHz"></div>
           </div>
           <div class="eq-presets">
-            <button class="preset-btn active" data-preset="flat">Flat</button>
-            <button class="preset-btn" data-preset="vocal">Vocal Boost</button>
-            <button class="preset-btn" data-preset="bass">Bass Boost</button>
-            <button class="preset-btn" data-preset="bright">Bright</button>
-            <button class="preset-btn" data-preset="warm">Warm</button>
-            <button class="preset-btn" data-preset="aifix">AI Fix</button>
+            <button class="preset-btn active" data-preset="flat" data-tip="Recommended starting point. Keeps the AI mastering tone unchanged.">Flat</button>
+            <button class="preset-btn" data-preset="vocal" data-tip="Use when vocals feel buried. Avoid if vocals are already sharp or nasal.">Vocal Boost</button>
+            <button class="preset-btn" data-preset="bass" data-tip="Use when the low end feels weak. Avoid if the limiter starts pumping.">Bass Boost</button>
+            <button class="preset-btn" data-preset="bright" data-tip="Use when the master is dull. Avoid if Metallic or Sibilance is noticeable.">Bright</button>
+            <button class="preset-btn" data-preset="warm" data-tip="Use when the master feels thin or cold. Avoid if it becomes muddy.">Warm</button>
+            <button class="preset-btn" data-preset="aifix" data-tip="Use when AI Auto still sounds muddy or brittle. It is a corrective EQ, not a louder preset.">AI Fix</button>
           </div>
         </div>
       </div>

@@ -50,6 +50,7 @@ const aiEnhance = document.getElementById('aiEnhance');
 const aiProfile = document.getElementById('aiProfile');
 const aiIntensity = document.getElementById('aiIntensity');
 const sibilanceProtection = document.getElementById('sibilanceProtection');
+const artifactProtection = document.getElementById('artifactProtection');
 const referenceMatch = document.getElementById('referenceMatch');
 const referenceAmount = document.getElementById('referenceAmount');
 const deharsh = document.getElementById('deharsh');
@@ -99,6 +100,7 @@ export function getCurrentSettings() {
     aiProfile: aiProfile?.value || 'auto',
     aiIntensity: (parseFloat(aiIntensity?.value) || 100) / 100,
     sibilanceProtection: (parseFloat(sibilanceProtection?.value) || 0) / 100,
+    artifactProtection: (parseFloat(artifactProtection?.value) || 0) / 100,
     referenceMatch: referenceMatch?.checked ?? false,
     referenceAmount: (parseFloat(referenceAmount?.value) || 65) / 100,
     referenceAnalysis,

@@ -52,6 +52,7 @@ import {
   destroyWaveSurfer,
   updateWaveSurferProgress,
   updateWaveformBuffer,
+  updateWaveformPeaks,
   showOriginalWaveform
 } from './ui/index.js';
 
@@ -88,6 +89,7 @@ const audioNodes = {
   previewPresence: null,
   previewSibilance: null,
   previewHarsh: null,
+  previewMetallic: null,
   previewAir: null,
   compressor: null,
   limiter: null,
@@ -110,6 +112,7 @@ const fileState = {
   selectedFilePath: null,
   originalBuffer: null,      // Original audio buffer
   normalizedBuffer: null,    // Loudness normalized buffer
+  normalizedTargetLufs: null, // Target used for normalizedBuffer
   processedBuffer: null,     // Buffer after denoise/exciter processing
   isNormalizing: false,      // True while normalization is in progress
   isProcessingEffects: false, // True while applying denoise/exciter
@@ -119,6 +122,8 @@ const fileState = {
   cachedRenderLufs: null,    // LUFS measured from cached buffer
   isRenderingCache: false,   // True while rendering to cache
   cacheRenderVersion: 0,     // Increments on each settings change
+  aiAnalysis: null,          // Cached source analysis for responsive live preview
+  waveformMode: 'original',  // 'original' | 'processed'
   forceLivePreview: false    // True while waiting for full rendered preview to catch up
 };
 
@@ -199,6 +204,8 @@ const aiIntensity = document.getElementById('aiIntensity');
 const aiIntensityValue = document.getElementById('aiIntensityValue');
 const sibilanceProtection = document.getElementById('sibilanceProtection');
 const sibilanceProtectionValue = document.getElementById('sibilanceProtectionValue');
+const artifactProtection = document.getElementById('artifactProtection');
+const artifactProtectionValue = document.getElementById('artifactProtectionValue');
 const centerBass = document.getElementById('centerBass');
 const cutMud = document.getElementById('cutMud');
 const addAir = document.getElementById('addAir');
@@ -326,6 +333,7 @@ function createAudioChain() {
   audioNodes.previewPresence = ctx.createBiquadFilter();
   audioNodes.previewSibilance = ctx.createBiquadFilter();
   audioNodes.previewHarsh = ctx.createBiquadFilter();
+  audioNodes.previewMetallic = ctx.createBiquadFilter();
   audioNodes.previewAir = ctx.createBiquadFilter();
   audioNodes.compressor = ctx.createDynamicsCompressor();
   audioNodes.limiter = ctx.createDynamicsCompressor();
@@ -417,6 +425,10 @@ function createAudioChain() {
   audioNodes.previewHarsh.frequency.value = 7800;
   audioNodes.previewHarsh.Q.value = 1.6;
   audioNodes.previewHarsh.gain.value = 0;
+  audioNodes.previewMetallic.type = 'peaking';
+  audioNodes.previewMetallic.frequency.value = 10800;
+  audioNodes.previewMetallic.Q.value = 3.2;
+  audioNodes.previewMetallic.gain.value = 0;
   audioNodes.previewAir.type = 'highshelf';
   audioNodes.previewAir.frequency.value = 12500;
   audioNodes.previewAir.gain.value = 0;
@@ -463,6 +475,7 @@ function createAudioChain() {
     .connect(audioNodes.previewPresence)
     .connect(audioNodes.previewSibilance)
     .connect(audioNodes.previewHarsh)
+    .connect(audioNodes.previewMetallic)
     .connect(audioNodes.previewAir)
     .connect(audioNodes.compressor)
     .connect(audioNodes.stereoSplitter);
@@ -542,6 +555,19 @@ function updateOutputLufs() {
 }
 
 function applyLiveChainParams() {
+  if (audioNodes.gain) {
+    let outputGain = 1;
+    if (
+      fileState.forceLivePreview &&
+      normalizeLoudness.checked &&
+      Number.isFinite(fileState.normalizedTargetLufs)
+    ) {
+      const targetDelta = parseFloat(targetLufsSlider.value) - fileState.normalizedTargetLufs;
+      outputGain = Math.pow(10, Math.max(-6, Math.min(6, targetDelta)) / 20);
+    }
+    audioNodes.gain.gain.setTargetAtTime(outputGain, audioNodes.context.currentTime, 0.015);
+  }
+
   // Highpass (clean low end)
   audioNodes.highpass.frequency.value = (cleanLowEnd.checked && !playerState.isBypassed) ? 30 : 1;
 
@@ -584,6 +610,7 @@ function applyPreviewApproximation() {
     audioNodes.previewPresence,
     audioNodes.previewSibilance,
     audioNodes.previewHarsh,
+    audioNodes.previewMetallic,
     audioNodes.previewAir
   ];
 
@@ -602,13 +629,17 @@ function applyPreviewApproximation() {
 
   try {
     const settings = getCurrentSettings();
-    const analysis = analyzeAIGeneratedMastering(fileState.originalBuffer);
+    const analysis = fileState.aiAnalysis || analyzeAIGeneratedMastering(fileState.originalBuffer);
+    fileState.aiAnalysis = analysis;
     const profile = chooseAIMasteringProfile(analysis, settings.aiProfile || 'auto');
     const moves = getAIGeneratedMasteringMoves(
       analysis,
       Math.max(0.25, Math.min(1.75, (profile.repairStrength ?? 1) * (settings.aiIntensity ?? 1))),
       profile,
-      { sibilanceProtection: settings.sibilanceProtection ?? 0.6 }
+      {
+        sibilanceProtection: settings.sibilanceProtection ?? 0.6,
+        artifactProtection: settings.artifactProtection ?? 0.7
+      }
     );
 
     const previewScale = 0.55;
@@ -617,6 +648,7 @@ function applyPreviewApproximation() {
     audioNodes.previewPresence.gain.value = moves.presenceCut * previewScale;
     audioNodes.previewSibilance.gain.value = moves.sibilanceCut * previewScale;
     audioNodes.previewHarsh.gain.value = moves.harshCut * previewScale;
+    audioNodes.previewMetallic.gain.value = moves.metallicCut * previewScale;
     audioNodes.previewAir.gain.value = moves.airShelf * previewScale;
 
     if (settings.referenceMatch && settings.referenceAnalysis) {
@@ -639,6 +671,9 @@ function updateAudioChain({ scheduleCache = true, immediate = false, delayMs = u
   if (!audioNodes.context || !audioNodes.highpass) return;
 
   applyLiveChainParams();
+  if (!playerState.isBypassed && fileState.originalBuffer) {
+    updateLiveWaveformPreview({ immediate, delayMs: Math.min(delayMs ?? 120, 120) });
+  }
 
   // Trigger cache render when settings change (not when merely toggling bypass)
   // This ensures preview/meter/export all use the same rendered buffer.
@@ -697,6 +732,13 @@ function switchToLivePreview() {
     return;
   }
 
+  if (fileState.forceLivePreview) {
+    applyLiveChainParams();
+    updateStereoWidth();
+    updateEQ();
+    return;
+  }
+
   const liveBuffer = fileState.normalizedBuffer || fileState.originalBuffer;
   const currentTime = getPlaybackPosition();
   playerState.pauseTime = Math.max(0, Math.min(currentTime, liveBuffer.duration - 0.001));
@@ -731,6 +773,62 @@ function updateInputGain() {
   audioNodes.inputGain.gain.setValueAtTime(linear, audioNodes.context?.currentTime || 0);
 }
 
+function showProcessedWaveform(buffer) {
+  if (!buffer || fileState.waveformMode === 'processed') return;
+  updateWaveformBuffer(buffer);
+  fileState.waveformMode = 'processed';
+}
+
+function showSourceWaveform() {
+  if (fileState.waveformMode === 'original') return;
+  showOriginalWaveform();
+  fileState.waveformMode = 'original';
+}
+
+function getLivePreviewWaveformGain() {
+  let gainDB = inputGainValue;
+
+  if (
+    normalizeLoudness.checked &&
+    Number.isFinite(fileState.normalizedTargetLufs)
+  ) {
+    gainDB += parseFloat(targetLufsSlider.value) - fileState.normalizedTargetLufs;
+  }
+
+  if (truePeakLimit.checked) {
+    gainDB = Math.min(gainDB, Math.max(0, ceilingValueDb + 1));
+  }
+
+  return Math.pow(10, Math.max(-12, Math.min(12, gainDB)) / 20);
+}
+
+function updateLiveWaveformPreview(options = {}) {
+  if (!fileState.originalBuffer || playerState.isBypassed) return;
+
+  const render = () => {
+    const buffer = fileState.normalizedBuffer || fileState.originalBuffer;
+    updateWaveformPeaks(buffer, {
+      gain: getLivePreviewWaveformGain()
+    });
+    fileState.waveformMode = 'live';
+  };
+
+  if (options.immediate) {
+    if (liveWaveformTimeout) {
+      clearTimeout(liveWaveformTimeout);
+      liveWaveformTimeout = null;
+    }
+    render();
+    return;
+  }
+
+  if (liveWaveformTimeout) clearTimeout(liveWaveformTimeout);
+  liveWaveformTimeout = setTimeout(() => {
+    liveWaveformTimeout = null;
+    render();
+  }, options.delayMs ?? 80);
+}
+
 // Fader initialization moved to ./ui/controls.js
 // Use initFaders() with callbacks from the imported module
 
@@ -741,8 +839,9 @@ function updateInputGain() {
 let cacheRenderTimeout = null;
 let cacheRenderQueued = false;
 let cacheRenderQueuedImmediate = false;
+let liveWaveformTimeout = null;
 const CACHE_RENDER_DEBOUNCE_MS = 500;
-const LIVE_PREVIEW_RENDER_DEBOUNCE_MS = 80;
+const LIVE_PREVIEW_RENDER_DEBOUNCE_MS = 300;
 
 // getCurrentSettings imported from ./ui/controls.js
 
@@ -837,6 +936,10 @@ function scheduleRenderToCache(options = {}) {
         fileState.cachedRenderLufs = lufs;
         fileState.forceLivePreview = false;
         applyLiveChainParams();
+        if (!playerState.isBypassed) {
+          fileState.waveformMode = 'original';
+          showProcessedWaveform(buffer);
+        }
 
         // Update LUFS display
         if (outputLufsDisplay) {
@@ -891,6 +994,17 @@ function scheduleRenderToCache(options = {}) {
 function schedulePreviewUpdate(options = {}) {
   if (playerState.isPlaying && !playerState.isBypassed && options.liveNow !== false) {
     switchToLivePreview();
+  } else if (fileState.forceLivePreview) {
+    applyLiveChainParams();
+    updateStereoWidth();
+    updateEQ();
+  }
+
+  if (!playerState.isBypassed && fileState.originalBuffer) {
+    updateLiveWaveformPreview({
+      immediate: options.immediate,
+      delayMs: Math.min(options.delayMs ?? LIVE_PREVIEW_RENDER_DEBOUNCE_MS, 120)
+    });
   }
 
   scheduleRenderToCache({
@@ -1068,6 +1182,8 @@ async function loadAudioFile(file) {
     // Clear cached render buffer (will be rebuilt when settings change)
     fileState.cachedRenderBuffer = null;
     fileState.cachedRenderLufs = null;
+    fileState.aiAnalysis = null;
+    fileState.waveformMode = 'original';
     fileState.cacheRenderVersion++;
 
     // Show measuring phase with intermediate progress updates
@@ -1084,6 +1200,7 @@ async function loadAudioFile(file) {
     fileState.originalLufs = originalLufs;
     fileState.originalTruePeak = originalTruePeak;
     fileState.originalSampleRate = decodedBuffer.sampleRate;
+    fileState.aiAnalysis = analyzeAIGeneratedMastering(decodedBuffer);
 
     // Normalize to target LUFS using pure JavaScript
     const normalizedBuffer = normalizeToLUFS(decodedBuffer, targetLufsDb);
@@ -1097,6 +1214,7 @@ async function loadAudioFile(file) {
 
     // Store normalized buffer
     fileState.normalizedBuffer = normalizedBuffer;
+    fileState.normalizedTargetLufs = targetLufsDb;
 
     // Apply effects (denoise, exciter) if enabled
     await processEffects();
@@ -1398,7 +1516,7 @@ clearReferenceBtn.addEventListener('click', () => {
   setReferenceAnalysis(null);
   referenceMatch.checked = false;
   referenceName.textContent = 'No reference';
-  setAssistantPresetActive('');
+  markCustomPreset();
   schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
   updateChecklist();
 });
@@ -1548,12 +1666,11 @@ bypassBtn.addEventListener('click', () => {
   // Update waveform display to show original or processed
   if (playerState.isBypassed) {
     fileState.forceLivePreview = false;
-    // Show original waveform (from the original file blob, not a converted AudioBuffer)
-    showOriginalWaveform();
+    showSourceWaveform();
   } else {
     // Show processed waveform (if cached buffer exists)
     if (fileState.cachedRenderBuffer) {
-      updateWaveformBuffer(fileState.cachedRenderBuffer);
+      showProcessedWaveform(fileState.cachedRenderBuffer);
     }
   }
 
@@ -1776,13 +1893,20 @@ function setAdvancedMode(enabled) {
 
 function setAssistantPresetActive(name) {
   assistantPresetButtons.forEach(btn => {
+    const isCustomButton = btn.dataset.masteringPreset === 'custom';
+    btn.classList.toggle('hidden', isCustomButton && name !== 'custom');
     btn.classList.toggle('active', btn.dataset.masteringPreset === name);
   });
+}
+
+function markCustomPreset() {
+  setAssistantPresetActive('custom');
 }
 
 function updateSliderLabels() {
   aiIntensityValue.textContent = `${aiIntensity.value}%`;
   sibilanceProtectionValue.textContent = `${sibilanceProtection.value}%`;
+  artifactProtectionValue.textContent = `${artifactProtection.value}%`;
   referenceAmountValue.textContent = `${referenceAmount.value}%`;
   stereoWidthValue.textContent = `${stereoWidthSlider.value}%`;
   targetLufsValue.textContent = `${targetLufsSlider.value} LUFS`;
@@ -1797,8 +1921,28 @@ function applyAssistantPreset(name) {
   if (name === 'manual') {
     aiEnhance.checked = false;
     referenceMatch.checked = false;
+    normalizeLoudness.checked = true;
+    truePeakLimit.checked = true;
+    cleanLowEnd.checked = true;
+    glueCompression.checked = true;
+    deharsh.checked = false;
+    centerBass.checked = true;
+    autoLevel.checked = false;
+    aiProfile.value = 'auto';
+    aiIntensity.value = '100';
+    sibilanceProtection.value = '50';
+    artifactProtection.value = '50';
+    referenceAmount.value = '65';
+    setTargetLufsControl(-14);
+    limiterCharacter.value = 'transparent';
+    addPunch.checked = false;
+    tapeWarmth.checked = false;
+    addAir.checked = false;
+    stereoWidthSlider.value = '100';
+    updateSliderLabels();
     setAssistantPresetActive('manual');
-    updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
+    schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+    updateOutputPresetButtons(outputPresets);
     updateChecklist();
     return;
   }
@@ -1816,6 +1960,7 @@ function applyAssistantPreset(name) {
     aiProfile.value = 'clean';
     aiIntensity.value = '90';
     sibilanceProtection.value = '70';
+    artifactProtection.value = '70';
     setTargetLufsControl(-14);
     limiterCharacter.value = 'transparent';
     addPunch.checked = false;
@@ -1826,6 +1971,7 @@ function applyAssistantPreset(name) {
     aiProfile.value = 'loud';
     aiIntensity.value = '115';
     sibilanceProtection.value = '70';
+    artifactProtection.value = '70';
     setTargetLufsControl(-9);
     limiterCharacter.value = 'dense';
     addPunch.checked = true;
@@ -1836,6 +1982,7 @@ function applyAssistantPreset(name) {
     aiProfile.value = 'auto';
     aiIntensity.value = '100';
     sibilanceProtection.value = '65';
+    artifactProtection.value = '70';
     referenceAmount.value = '65';
     setTargetLufsControl(-12);
     limiterCharacter.value = 'balanced';
@@ -1851,6 +1998,7 @@ function applyAssistantPreset(name) {
     aiProfile.value = 'auto';
     aiIntensity.value = '105';
     sibilanceProtection.value = '65';
+    artifactProtection.value = '70';
     setTargetLufsControl(-12);
     limiterCharacter.value = 'balanced';
     addPunch.checked = true;
@@ -1862,7 +2010,7 @@ function applyAssistantPreset(name) {
   stereoWidthSlider.value = '100';
   updateSliderLabels();
   setAssistantPresetActive(name);
-  updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
   updateOutputPresetButtons(outputPresets);
   updateChecklist();
 }
@@ -1899,6 +2047,7 @@ advancedMode.addEventListener('change', () => {
 
 assistantPresetButtons.forEach(btn => {
   btn.addEventListener('click', () => {
+    if (btn.dataset.masteringPreset === 'custom') return;
     applyAssistantPreset(btn.dataset.masteringPreset);
   });
 });
@@ -1907,7 +2056,7 @@ assistantPresetButtons.forEach(btn => {
 // These are applied offline for preview/export parity
 [deharsh, aiEnhance, aiProfile, addAir, tapeWarmth, addPunch].forEach(el => {
   el.addEventListener('change', () => {
-    setAssistantPresetActive('');
+    markCustomPreset();
     processEffects();
     updateChecklist();
   });
@@ -1915,7 +2064,7 @@ assistantPresetButtons.forEach(btn => {
 
 aiIntensity.addEventListener('input', () => {
   aiIntensityValue.textContent = `${aiIntensity.value}%`;
-  setAssistantPresetActive('');
+  markCustomPreset();
   if (playerState.isPlaying && !playerState.isBypassed) {
     schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
   }
@@ -1928,7 +2077,7 @@ aiIntensity.addEventListener('change', () => {
 
 sibilanceProtection.addEventListener('input', () => {
   sibilanceProtectionValue.textContent = `${sibilanceProtection.value}%`;
-  setAssistantPresetActive('');
+  markCustomPreset();
   if (playerState.isPlaying && !playerState.isBypassed) {
     schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
   }
@@ -1939,15 +2088,28 @@ sibilanceProtection.addEventListener('change', () => {
   updateChecklist();
 });
 
+artifactProtection.addEventListener('input', () => {
+  artifactProtectionValue.textContent = `${artifactProtection.value}%`;
+  markCustomPreset();
+  if (playerState.isPlaying && !playerState.isBypassed) {
+    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
+  }
+});
+
+artifactProtection.addEventListener('change', () => {
+  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  updateChecklist();
+});
+
 referenceMatch.addEventListener('change', () => {
-  setAssistantPresetActive(referenceMatch.checked ? 'reference' : '');
+  setAssistantPresetActive(referenceMatch.checked ? 'reference' : 'custom');
   schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
   updateChecklist();
 });
 
 referenceAmount.addEventListener('input', () => {
   referenceAmountValue.textContent = `${referenceAmount.value}%`;
-  setAssistantPresetActive(referenceMatch.checked ? 'reference' : '');
+  setAssistantPresetActive(referenceMatch.checked ? 'reference' : 'custom');
   if (playerState.isPlaying && !playerState.isBypassed) {
     schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
   }
@@ -2029,6 +2191,7 @@ async function renormalizeAudio(newTargetLufs) {
 
     // Update normalized buffer
     fileState.normalizedBuffer = normalizedBuffer;
+    fileState.normalizedTargetLufs = newTargetLufs;
 
     // Re-apply effects (denoise, exciter) if enabled
     await processEffects();
