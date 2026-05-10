@@ -329,14 +329,13 @@ function getLoudestRanges(mono, sampleRate, activeRanges) {
   const activeDuration = Math.max(1, rangesDuration(activeRanges));
   const targetDuration = clamp(activeDuration * 0.28, sampleRate * 1.2, sampleRate * 18);
   const loudestWindows = windows
-    .sort((a, b) => b.rms - a.rms)
-    .slice(0, 12);
+    .sort((a, b) => b.rms - a.rms);
 
   const selected = [];
   let selectedDuration = 0;
   for (const window of loudestWindows) {
     selected.push({ start: window.start, end: window.end });
-    selectedDuration += window.end - window.start;
+    selectedDuration = rangesDuration(mergeRanges(selected));
     if (selectedDuration >= targetDuration) break;
   }
 

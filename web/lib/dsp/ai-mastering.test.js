@@ -90,6 +90,23 @@ function makeQuietIntroHarshChorusBuffer({ sampleRate = 48000 }) {
   return buffer;
 }
 
+function makeSteadyActiveBuffer({ sampleRate = 48000, seconds = 24 }) {
+  const length = sampleRate * seconds;
+  const buffer = new TestAudioBuffer({ numberOfChannels: 2, length, sampleRate });
+
+  for (let ch = 0; ch < 2; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < length; i++) {
+      const t = i / sampleRate;
+      data[i] =
+        Math.sin(2 * Math.PI * 120 * t) * 0.1 +
+        Math.sin(2 * Math.PI * 900 * t) * 0.08;
+    }
+  }
+
+  return buffer;
+}
+
 describe('AI-generated mastering repair', () => {
   beforeAll(() => {
     globalThis.AudioBuffer = TestAudioBuffer;
@@ -180,6 +197,15 @@ describe('AI-generated mastering repair', () => {
     expect(analysis.loudestRatio).toBeLessThan(analysis.activeRatio);
     expect(analysis.profile.harshDB).toBeGreaterThan(-13);
     expect(profile.name).toBe('clean');
+  });
+
+  it('keeps enough loudest-section duration for stable mastering decisions', () => {
+    const buffer = makeSteadyActiveBuffer({});
+    const analysis = analyzeAIGeneratedMastering(buffer);
+
+    expect(analysis.activeRatio).toBeGreaterThan(0.95);
+    expect(analysis.loudestRatio).toBeGreaterThan(0.25);
+    expect(analysis.loudestRatio).toBeLessThan(0.35);
   });
 
   it('uses oversampled true peak for source headroom analysis', () => {
