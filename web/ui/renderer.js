@@ -105,7 +105,8 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
       profile: settings.aiProfile || 'auto',
       intensity: settings.aiIntensity ?? 1,
       sibilanceProtection: settings.sibilanceProtection ?? 0.6,
-      artifactProtection: settings.artifactProtection ?? 0.7
+      artifactProtection: settings.artifactProtection ?? 0.7,
+      cleanLowEnd: settings.cleanLowEnd
     });
     renderedBuffer = repaired.buffer;
     aiProfile = repaired.profile || aiProfile;
@@ -186,7 +187,7 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     const profileWidth = aiProfile.stereoWidthScale ?? 1;
     const effectiveWidth = Math.max(0, Math.min(2, baseWidth * profileWidth));
     const bassFreq = aiProfile.bassMonoFreq ?? 200;
-    if (Math.abs(effectiveWidth - baseWidth) > 0.01 || (settings.centerBass && bassFreq !== 200)) {
+    if (settings.centerBass || Math.abs(effectiveWidth - 1) > 0.01) {
       renderedBuffer = adjustStereoWidth(renderedBuffer, effectiveWidth, !!settings.centerBass, bassFreq);
     }
   }

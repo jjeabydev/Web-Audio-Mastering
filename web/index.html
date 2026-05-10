@@ -205,6 +205,20 @@
           <div class="control-help">
             Start with AI Auto. If high notes sound robotic, raise Metallic. If vocal S sounds are sharp, raise Sibilance.
           </div>
+          <div class="analysis-strip" id="analysisStrip" data-tip="Shows what the upload analysis and current mode are doing to protect quality.">
+            <div class="analysis-item">
+              <span>Focus</span>
+              <strong id="analysisFocusValue">Waiting</strong>
+            </div>
+            <div class="analysis-item">
+              <span>Risk</span>
+              <strong id="analysisRiskValue">--</strong>
+            </div>
+            <div class="analysis-item">
+              <span>Safe</span>
+              <strong id="analysisSafeValue">On</strong>
+            </div>
+          </div>
           <label class="toggle-row"
             data-tip="Automatic AI/MP3 mastering repair: adapts harshness, mud, low-end cleanup, clipper drive, and final loudness behavior.">
             <span>AI Mastering</span>
@@ -376,6 +390,12 @@
           <h3>Loudness <span class="live-badge">Live</span></h3>
           <div class="control-help">
             Use -12 LUFS for a loud modern master, -14 for safer streaming, and -9 only when you want aggressive loudness. If the master pumps or distorts, lower Target or choose a softer Limiter.
+          </div>
+          <div class="mode-strip" id="modeStrip" data-tip="These values are updated by AI Auto, mode changes, and source-safe protection.">
+            <span id="modeTargetValue">Target -12</span>
+            <span id="modeInputValue">Input -3.5</span>
+            <span id="modeCeilingValue">TP -1.0</span>
+            <span id="modeLimiterValue">Balanced</span>
           </div>
           <div class="loudness-faders">
             <div id="inputGainFader" class="fader-container"

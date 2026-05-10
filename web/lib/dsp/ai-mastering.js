@@ -17,6 +17,10 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function roundToStep(value, step) {
+  return Math.round(value / step) * step;
+}
+
 export const AI_MASTERING_PROFILES = {
   universal: {
     repairStrength: 0.95,
@@ -130,7 +134,7 @@ export const AI_MASTERING_PROFILES = {
     repairStrength: 0.9,
     maxLimiterPushDB: 1.15,
     softClipDrive: 1.35,
-    stereoWidthScale: 1.18,
+    stereoWidthScale: 1.08,
     bassMonoFreq: 240,
     tone: { bass: -0.1, mud: -0.25, presence: 0.05, harsh: -0.25, air: 0.35 },
     description: 'Open top end and cleaner mids for wider-feeling masters'
@@ -251,11 +255,208 @@ function bandRms(mono, sampleRate, frequency, Q) {
   return calculateRMS(applyBiquadFilter(mono, coeffs));
 }
 
+function getActiveRanges(mono, sampleRate) {
+  const windowSize = Math.max(1024, Math.floor(sampleRate * 0.4));
+  const hopSize = Math.max(512, Math.floor(windowSize / 2));
+  const windows = [];
+
+  for (let start = 0; start < mono.length; start += hopSize) {
+    const end = Math.min(start + windowSize, mono.length);
+    let sum = 0;
+    for (let i = start; i < end; i++) sum += mono[i] * mono[i];
+    windows.push({ start, end, rms: Math.sqrt(sum / Math.max(1, end - start)) });
+    if (end >= mono.length) break;
+  }
+
+  if (!windows.length) return [{ start: 0, end: mono.length }];
+
+  const sorted = windows.map(window => window.rms).sort((a, b) => a - b);
+  const p80 = percentile(sorted, 0.8);
+  const threshold = Math.max(p80 * 0.35, sorted[sorted.length - 1] * 0.18, 1e-5);
+  const ranges = windows
+    .filter(window => window.rms >= threshold)
+    .map(window => ({ start: window.start, end: window.end }));
+
+  return ranges.length ? mergeRanges(ranges) : [{ start: 0, end: mono.length }];
+}
+
+function mergeRanges(ranges) {
+  if (!ranges.length) return [];
+  const sorted = [...ranges].sort((a, b) => a.start - b.start);
+  const merged = [sorted[0]];
+
+  for (let i = 1; i < sorted.length; i++) {
+    const current = sorted[i];
+    const previous = merged[merged.length - 1];
+    if (current.start <= previous.end) {
+      previous.end = Math.max(previous.end, current.end);
+    } else {
+      merged.push({ ...current });
+    }
+  }
+
+  return merged;
+}
+
+function rangesDuration(ranges) {
+  return ranges.reduce((sum, range) => sum + Math.max(0, range.end - range.start), 0);
+}
+
+function overlapsRanges(start, end, ranges) {
+  return ranges.some(range => start < range.end && end > range.start);
+}
+
+function getLoudestRanges(mono, sampleRate, activeRanges) {
+  const windowSize = Math.max(1024, Math.floor(sampleRate * 0.45));
+  const hopSize = Math.max(512, Math.floor(windowSize / 3));
+  const windows = [];
+
+  for (let start = 0; start < mono.length; start += hopSize) {
+    const end = Math.min(start + windowSize, mono.length);
+    if (!overlapsRanges(start, end, activeRanges)) {
+      if (end >= mono.length) break;
+      continue;
+    }
+
+    let sum = 0;
+    for (let i = start; i < end; i++) sum += mono[i] * mono[i];
+    windows.push({ start, end, rms: Math.sqrt(sum / Math.max(1, end - start)) });
+    if (end >= mono.length) break;
+  }
+
+  if (!windows.length) return activeRanges;
+
+  const activeDuration = Math.max(1, rangesDuration(activeRanges));
+  const targetDuration = clamp(activeDuration * 0.28, sampleRate * 1.2, sampleRate * 18);
+  const loudestWindows = windows
+    .sort((a, b) => b.rms - a.rms)
+    .slice(0, 12);
+
+  const selected = [];
+  let selectedDuration = 0;
+  for (const window of loudestWindows) {
+    selected.push({ start: window.start, end: window.end });
+    selectedDuration += window.end - window.start;
+    if (selectedDuration >= targetDuration) break;
+  }
+
+  return selected.length ? mergeRanges(selected) : activeRanges;
+}
+
+function rangedRms(samples, ranges) {
+  let sum = 0;
+  let count = 0;
+
+  for (const range of ranges) {
+    const end = Math.min(range.end, samples.length);
+    for (let i = range.start; i < end; i++) {
+      sum += samples[i] * samples[i];
+      count++;
+    }
+  }
+
+  return Math.sqrt(sum / Math.max(1, count));
+}
+
+function bandRmsActive(mono, sampleRate, frequency, Q, activeRanges) {
+  const coeffs = calcBiquadCoeffs('bandpass', sampleRate, frequency, 0, Q);
+  return rangedRms(applyBiquadFilter(mono, coeffs), activeRanges);
+}
+
+function bandRmsFocused(mono, sampleRate, frequency, Q, activeRanges, loudestRanges) {
+  const coeffs = calcBiquadCoeffs('bandpass', sampleRate, frequency, 0, Q);
+  const filtered = applyBiquadFilter(mono, coeffs);
+  const active = rangedRms(filtered, activeRanges);
+  const loudest = rangedRms(filtered, loudestRanges);
+  return active * 0.35 + loudest * 0.65;
+}
+
+function percentile(sortedValues, p) {
+  if (!sortedValues.length) return 0;
+  const index = clamp((sortedValues.length - 1) * p, 0, sortedValues.length - 1);
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sortedValues[lower];
+  const weight = index - lower;
+  return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight;
+}
+
+function analyzePeakBehavior(buffer, mono, fullRms, peak, activeRanges = [{ start: 0, end: mono.length }]) {
+  const nearPeakThreshold = dbToLinear(-1);
+  const clipThreshold = 0.999;
+  let nearPeakCount = 0;
+  let clippedCount = 0;
+  let totalActiveSamples = 0;
+
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (const range of activeRanges) {
+      const end = Math.min(range.end, data.length);
+      totalActiveSamples += Math.max(0, end - range.start);
+      for (let i = range.start; i < end; i++) {
+        const abs = Math.abs(data[i]);
+        if (abs >= nearPeakThreshold) nearPeakCount++;
+        if (abs >= clipThreshold) clippedCount++;
+      }
+    }
+  }
+
+  const windowSize = Math.max(1024, Math.floor(buffer.sampleRate * 0.4));
+  const hopSize = Math.max(512, Math.floor(windowSize / 2));
+  const windowStats = [];
+  const isActiveWindow = (start, end) => {
+    const midpoint = Math.floor((start + end) / 2);
+    return activeRanges.some(range => midpoint >= range.start && midpoint < range.end);
+  };
+
+  for (let start = 0; start < mono.length; start += hopSize) {
+    const end = Math.min(start + windowSize, mono.length);
+    let sum = 0;
+    let localPeak = 0;
+
+    for (let i = start; i < end; i++) {
+      const sample = mono[i];
+      sum += sample * sample;
+      localPeak = Math.max(localPeak, Math.abs(sample));
+    }
+
+    const rms = Math.sqrt(sum / Math.max(1, end - start));
+    if (isActiveWindow(start, end)) {
+      windowStats.push({
+        rms,
+        peak: localPeak,
+        crestDB: rms > 0 ? linearToDb((localPeak + 1e-9) / (rms + 1e-9)) : 0
+      });
+    }
+
+    if (end >= mono.length) break;
+  }
+
+  const activeWindowStats = windowStats.length ? windowStats : [{ rms: fullRms, peak, crestDB: fullRms > 0 ? linearToDb((peak + 1e-9) / (fullRms + 1e-9)) : 0 }];
+  const rmsValues = activeWindowStats.map(stat => stat.rms).sort((a, b) => a - b);
+  const loudest = activeWindowStats.reduce((best, stat) => stat.rms > best.rms ? stat : best, { rms: 0, peak: 0, crestDB: 0 });
+  const p20 = percentile(rmsValues, 0.2);
+  const p95 = percentile(rmsValues, 0.95);
+  const dynamicSpreadDB = linearToDb((p95 + 1e-9) / (p20 + 1e-9));
+
+  return {
+    peakDensity: totalActiveSamples > 0 ? nearPeakCount / totalActiveSamples : 0,
+    clipDensity: totalActiveSamples > 0 ? clippedCount / totalActiveSamples : 0,
+    loudestRmsDB: linearToDb(loudest.rms + 1e-9),
+    loudestCrestDB: loudest.crestDB,
+    dynamicSpreadDB,
+    truePeakHeadroomDB: -linearToDb(peak + 1e-9),
+    overallCrestDB: fullRms > 0 ? linearToDb((peak + 1e-9) / (fullRms + 1e-9)) : 0
+  };
+}
+
 function analyzeStereoImage(buffer) {
   if (buffer.numberOfChannels < 2) {
     return {
       correlation: 1,
       sideToMidDB: -60,
+      lowSideToMidDB: -60,
+      highSideToMidDB: -60,
       sideEnergy: 0,
       midEnergy: 0
     };
@@ -263,6 +464,8 @@ function analyzeStereoImage(buffer) {
 
   const left = buffer.getChannelData(0);
   const right = buffer.getChannelData(1);
+  const midData = new Float32Array(buffer.length);
+  const sideData = new Float32Array(buffer.length);
   let sumLR = 0;
   let sumL2 = 0;
   let sumR2 = 0;
@@ -281,14 +484,25 @@ function analyzeStereoImage(buffer) {
     sumSide2 += side * side;
   }
 
+  for (let i = 0; i < left.length; i++) {
+    midData[i] = (left[i] + right[i]) * 0.5;
+    sideData[i] = (left[i] - right[i]) * 0.5;
+  }
+
   const correlationDenominator = Math.sqrt(sumL2 * sumR2);
   const correlation = correlationDenominator > 0 ? sumLR / correlationDenominator : 1;
   const midEnergy = Math.sqrt(sumMid2);
   const sideEnergy = Math.sqrt(sumSide2);
+  const lowMid = bandRms(midData, buffer.sampleRate, 120, 0.9);
+  const lowSide = bandRms(sideData, buffer.sampleRate, 120, 0.9);
+  const highMid = bandRms(midData, buffer.sampleRate, 8500, 1.4);
+  const highSide = bandRms(sideData, buffer.sampleRate, 8500, 1.4);
 
   return {
     correlation: clamp(correlation, -1, 1),
     sideToMidDB: linearToDb((sideEnergy + 1e-9) / (midEnergy + 1e-9)),
+    lowSideToMidDB: linearToDb((lowSide + 1e-9) / (lowMid + 1e-9)),
+    highSideToMidDB: linearToDb((highSide + 1e-9) / (highMid + 1e-9)),
     sideEnergy,
     midEnergy
   };
@@ -297,6 +511,10 @@ function analyzeStereoImage(buffer) {
 export function analyzeAIGeneratedMastering(buffer) {
   const mono = downmixMono(buffer);
   const fullRms = calculateRMS(mono);
+  const activeRanges = getActiveRanges(mono, buffer.sampleRate);
+  const loudestRanges = getLoudestRanges(mono, buffer.sampleRate, activeRanges);
+  const activeRms = rangedRms(mono, activeRanges);
+  const loudestRms = rangedRms(mono, loudestRanges);
   const peak = Math.max(...Array.from({ length: buffer.numberOfChannels }, (_, ch) => {
     const data = buffer.getChannelData(ch);
     let channelPeak = 0;
@@ -306,37 +524,66 @@ export function analyzeAIGeneratedMastering(buffer) {
   const crestDB = fullRms > 0 ? linearToDb(peak / fullRms) : 0;
 
   const bands = {
-    sub: bandRms(mono, buffer.sampleRate, 45, 0.9),
-    bass: bandRms(mono, buffer.sampleRate, 110, 0.9),
-    mud: bandRms(mono, buffer.sampleRate, 280, 1.1),
-    body: bandRms(mono, buffer.sampleRate, 900, 0.9),
-    presence: bandRms(mono, buffer.sampleRate, 3800, 1.0),
-    harsh: bandRms(mono, buffer.sampleRate, 7800, 1.4),
-    metallic: bandRms(mono, buffer.sampleRate, 10800, 2.8),
-    air: bandRms(mono, buffer.sampleRate, 13500, 0.8)
+    sub: bandRmsFocused(mono, buffer.sampleRate, 45, 0.9, activeRanges, loudestRanges),
+    bass: bandRmsFocused(mono, buffer.sampleRate, 110, 0.9, activeRanges, loudestRanges),
+    mud: bandRmsFocused(mono, buffer.sampleRate, 280, 1.1, activeRanges, loudestRanges),
+    body: bandRmsFocused(mono, buffer.sampleRate, 900, 0.9, activeRanges, loudestRanges),
+    presence: bandRmsFocused(mono, buffer.sampleRate, 3800, 1.0, activeRanges, loudestRanges),
+    harsh: bandRmsFocused(mono, buffer.sampleRate, 7800, 1.4, activeRanges, loudestRanges),
+    metallic: bandRmsFocused(mono, buffer.sampleRate, 10800, 2.8, activeRanges, loudestRanges),
+    air: bandRmsFocused(mono, buffer.sampleRate, 13500, 0.8, activeRanges, loudestRanges)
   };
 
-  const toFullDB = value => linearToDb((value + 1e-9) / (fullRms + 1e-9));
+  const focusedRms = activeRms * 0.35 + loudestRms * 0.65;
+  const analysisRms = Math.max(focusedRms, activeRms, fullRms, 1e-9);
+  const toFullDB = value => linearToDb((value + 1e-9) / (analysisRms + 1e-9));
   const mudDB = toFullDB(bands.mud);
   const harshDB = toFullDB(bands.harsh);
   const metallicDB = toFullDB(bands.metallic);
   const airDB = toFullDB(bands.air);
   const subToBassDB = linearToDb((bands.sub + 1e-9) / (bands.bass + 1e-9));
+  const bassToBodyDB = linearToDb((bands.bass + 1e-9) / (bands.body + 1e-9));
   const presenceToBodyDB = linearToDb((bands.presence + 1e-9) / (bands.body + 1e-9));
   const stereo = analyzeStereoImage(buffer);
+  const peaks = analyzePeakBehavior(buffer, mono, fullRms, peak, activeRanges);
+  const codecStress = clamp(
+    (metallicDB + 16) * 0.055 +
+    (harshDB + 14) * 0.045 +
+    Math.max(0, peaks.peakDensity - 0.002) * 34 +
+    Math.max(0, 8 - peaks.loudestCrestDB) * 0.08 +
+    Math.max(0, -0.05 - stereo.correlation) * 0.6,
+    0,
+    1
+  );
+  const limiterRisk = clamp(
+    Math.max(0, peaks.peakDensity - 0.001) * 45 +
+    Math.max(0, peaks.clipDensity) * 120 +
+    Math.max(0, 7.5 - peaks.loudestCrestDB) * 0.11 +
+    Math.max(0, subToBassDB + 2) * 0.08,
+    0,
+    1
+  );
 
   return {
     fullRms,
+    activeRms,
+    loudestRms,
+    activeRatio: activeRanges.reduce((sum, range) => sum + Math.max(0, range.end - range.start), 0) / Math.max(1, mono.length),
+    loudestRatio: loudestRanges.reduce((sum, range) => sum + Math.max(0, range.end - range.start), 0) / Math.max(1, mono.length),
     peak,
     crestDB,
     bands,
     stereo,
+    peaks,
+    codecStress,
+    limiterRisk,
     profile: {
       mudDB,
       harshDB,
       metallicDB,
       airDB,
       subToBassDB,
+      bassToBodyDB,
       presenceToBodyDB
     }
   };
@@ -347,17 +594,48 @@ export function chooseAIMasteringProfile(analysis, requestedProfile = 'auto') {
     return { name: requestedProfile, ...AI_MASTERING_PROFILES[requestedProfile] };
   }
 
-  const { harshDB, airDB, subToBassDB, presenceToBodyDB } = analysis.profile;
+  const { mudDB, harshDB, metallicDB = -18, airDB, subToBassDB, presenceToBodyDB } = analysis.profile;
+  const { peakDensity = 0, clipDensity = 0, loudestCrestDB = analysis.crestDB, dynamicSpreadDB = 0 } = analysis.peaks || {};
+  const stereoRisk = analysis.stereo
+    ? clamp((analysis.stereo.sideToMidDB + 5) / 8, 0, 1) +
+      clamp((analysis.stereo.lowSideToMidDB + 10) / 10, 0, 1) +
+      clamp((0.12 - analysis.stereo.correlation) / 0.5, 0, 1)
+    : 0;
 
-  if (analysis.crestDB < 6.5 || harshDB > -10 || presenceToBodyDB > 2.5) {
+  if (
+    analysis.codecStress > 0.55 ||
+    analysis.limiterRisk > 0.55 ||
+    clipDensity > 0.0001 ||
+    peakDensity > 0.015 ||
+    loudestCrestDB < 6.5 ||
+    harshDB > -10 ||
+    metallicDB > -12 ||
+    presenceToBodyDB > 2.8
+  ) {
     return { name: 'clean', ...AI_MASTERING_PROFILES.clean };
   }
 
-  if (analysis.crestDB > 13 && subToBassDB < -5 && harshDB < -13) {
+  if (stereoRisk > 0.9) {
+    return { name: 'clean', ...AI_MASTERING_PROFILES.clean };
+  }
+
+  if (stereoRisk < 0.18 && analysis.stereo?.sideToMidDB < -14 && harshDB < -12 && metallicDB < -14 && airDB < -21) {
+    return { name: 'spatial', ...AI_MASTERING_PROFILES.spatial };
+  }
+
+  if (dynamicSpreadDB > 12 && analysis.crestDB > 13.5) {
+    return { name: 'cinematic', ...AI_MASTERING_PROFILES.cinematic };
+  }
+
+  if (mudDB > -7.5 && harshDB < -12) {
+    return { name: 'clarity', ...AI_MASTERING_PROFILES.clarity };
+  }
+
+  if (analysis.crestDB > 13 && subToBassDB < -5 && harshDB < -13 && analysis.limiterRisk < 0.4) {
     return { name: 'punchy', ...AI_MASTERING_PROFILES.punchy };
   }
 
-  if (airDB < -24 && harshDB < -14 && analysis.crestDB > 10) {
+  if (airDB < -24 && harshDB < -14 && metallicDB < -16 && analysis.crestDB > 10 && analysis.limiterRisk < 0.35) {
     return { name: 'loud', ...AI_MASTERING_PROFILES.loud };
   }
 
@@ -365,24 +643,28 @@ export function chooseAIMasteringProfile(analysis, requestedProfile = 'auto') {
 }
 
 export function getAIGeneratedMasteringMoves(analysis, strength = 1, profile = AI_MASTERING_PROFILES.universal, options = {}) {
-  const { mudDB, harshDB, metallicDB = -18, airDB, subToBassDB, presenceToBodyDB } = analysis.profile;
+  const { mudDB, harshDB, metallicDB = -18, airDB, subToBassDB, bassToBodyDB = 0, presenceToBodyDB } = analysis.profile;
   const tone = profile.tone || {};
   const sibilanceAmount = clamp(options.sibilanceProtection ?? 0.6, 0, 1);
   const artifactAmount = clamp(options.artifactProtection ?? 0.7, 0, 1);
   const lowCutFreq = clamp(30 + Math.max(0, subToBassDB + 1) * 4, 30, 42);
   const mudCut = clamp((-clamp((mudDB + 10) * 0.35, 0, 2.8) + (tone.mud || 0)) * strength, -3.2, 0.6);
   const presenceCut = clamp((-clamp((presenceToBodyDB + 1.5) * 0.4, 0, 2.2) + (tone.presence || 0)) * strength, -2.8, 0.9);
-  const sibilanceCut = -clamp((harshDB + 15) * 0.28 + sibilanceAmount * 1.15, 0.4, 3.4) * strength;
-  const harshCut = clamp((-clamp((harshDB + 13) * 0.55, 0.4, 3.5) + (tone.harsh || 0) + sibilanceCut * 0.35) * strength, -4.8, -0.15);
-  const metallicExcess = clamp((metallicDB + 17) * 0.16, 0, 1.45);
+  const sibilanceRisk = clamp((harshDB + 15) * 0.28 + Math.max(0, metallicDB + 17) * 0.08, 0, 3.1);
+  const sibilanceCut = -clamp(sibilanceRisk * (0.45 + sibilanceAmount * 0.75) * strength, 0, 3.4);
+  const harshRisk = clamp((harshDB + 13) * 0.55, 0, 3.5);
+  const harshCut = Math.min(0, clamp((-(harshRisk) + (tone.harsh || 0) + sibilanceCut * 0.35) * strength, -4.8, 0));
+  const metallicExcess = clamp((metallicDB + 17) * 0.18 + Math.max(0, harshDB + 13) * 0.05 + (analysis.codecStress ?? 0) * 0.75, 0, 2.5);
   const metallicBase = clamp(
-    0.12 + metallicExcess + artifactAmount * 1.55 + Math.max(0, harshDB + 13) * 0.06,
-    0.1,
+    metallicExcess * (0.45 + artifactAmount * 0.95),
+    0,
     3.2
   );
-  const metallicCut = -clamp(metallicBase * strength, 0.1, 4.2);
+  const metallicCut = -clamp(metallicBase * strength, 0, 4.2);
   const airShelf = clamp((clamp((-18 - airDB) * 0.16, -1.2, 1.2) + (tone.air || 0) + metallicCut * 0.08) * strength, -1.8, 1.4);
-  const bassLift = clamp((clamp((-3 - subToBassDB) * 0.18, 0, 1.2) + (tone.bass || 0)) * strength, -0.8, 1.8);
+  const bassDeficit = clamp((-3 - bassToBodyDB) * 0.18, 0, 1.1);
+  const lowHeadroomRisk = clamp((analysis.limiterRisk ?? 0) + Math.max(0, subToBassDB + 1) * 0.1, 0, 1);
+  const bassLift = clamp((bassDeficit * (1 - lowHeadroomRisk * 0.55) + (tone.bass || 0)) * strength, -0.8, 1.8);
 
   return {
     lowCutFreq,
@@ -412,7 +694,9 @@ export function applyAIGeneratedMasteringRepair(buffer, options = {}) {
   });
   let output = buffer;
 
-  output = applyFilterToBuffer(output, 'highpass', moves.lowCutFreq, 0, 0.707);
+  if (options.cleanLowEnd !== false) {
+    output = applyFilterToBuffer(output, 'highpass', moves.lowCutFreq, 0, 0.707);
+  }
   output = applyFilterToBuffer(output, 'lowshelf', 95, moves.bassLift, 0.7);
   output = applyFilterToBuffer(output, 'peaking', 280, moves.mudCut, 1.15);
   output = applyFilterToBuffer(output, 'peaking', 3900, moves.presenceCut, 1.1);
@@ -439,12 +723,19 @@ export function applyReferenceMatch(buffer, referenceAnalysis, options = {}) {
   const analysis = analyzeAIGeneratedMastering(buffer);
   const source = analysis.profile;
   const target = referenceAnalysis.profile;
+  const fragileHighs = (analysis.codecStress ?? 0) > 0.36 || source.harshDB > -12 || source.metallicDB > -14;
+  const limiterRisk = analysis.limiterRisk ?? 0;
+  const positiveMatchScale = fragileHighs ? 0.45 : 1;
+  const limiterMatchScale = limiterRisk > 0.45 ? 0.65 : 1;
 
   const bassShelf = clamp((target.subToBassDB - source.subToBassDB) * -0.18 * amount, -1.2, 1.2);
   const mudMatch = clamp((target.mudDB - source.mudDB) * 0.32 * amount, -2.2, 1.4);
-  const presenceMatch = clamp((target.presenceToBodyDB - source.presenceToBodyDB) * 0.28 * amount, -1.8, 1.5);
-  const harshMatch = clamp((target.harshDB - source.harshDB) * 0.24 * amount, -2.4, 0.7);
-  const airMatch = clamp((target.airDB - source.airDB) * 0.22 * amount, -1.6, 1.6);
+  const rawPresenceMatch = clamp((target.presenceToBodyDB - source.presenceToBodyDB) * 0.28 * amount, -1.8, 1.5);
+  const rawHarshMatch = clamp((target.harshDB - source.harshDB) * 0.24 * amount, -2.4, 0.7);
+  const rawAirMatch = clamp((target.airDB - source.airDB) * 0.22 * amount, -1.6, 1.6);
+  const presenceMatch = rawPresenceMatch > 0 ? rawPresenceMatch * positiveMatchScale * limiterMatchScale : rawPresenceMatch;
+  const harshMatch = rawHarshMatch > 0 ? rawHarshMatch * positiveMatchScale * limiterMatchScale : rawHarshMatch;
+  const airMatch = rawAirMatch > 0 ? rawAirMatch * positiveMatchScale * limiterMatchScale : rawAirMatch;
 
   let output = buffer;
   output = applyFilterToBuffer(output, 'lowshelf', 95, bassShelf, 0.7);
@@ -475,13 +766,20 @@ export function applyLimiterStressGuard(buffer, options = {}) {
   const analysis = analyzeAIGeneratedMastering(buffer);
   const { mudDB, harshDB, metallicDB = -18, airDB, subToBassDB, presenceToBodyDB } = analysis.profile;
   const targetLufs = options.targetLufs ?? -12;
-  const loudnessPressure = clamp((-12 - targetLufs) * 0.16 + (options.intensity ?? 1) * 0.18, 0.08, 0.55);
+  const peakPressure = clamp(
+    (analysis.limiterRisk ?? 0) * 0.55 +
+    (analysis.codecStress ?? 0) * 0.25 +
+    Math.max(0, 7.5 - (analysis.peaks?.loudestCrestDB ?? 12)) * 0.06,
+    0,
+    0.55
+  );
+  const loudnessPressure = clamp((-12 - targetLufs) * 0.16 + (options.intensity ?? 1) * 0.18 + peakPressure, 0.08, 0.75);
 
   const lowStress = clamp((subToBassDB + 2.5) * 0.18 + loudnessPressure, 0, 1.2) * amount;
   const mudStress = clamp((mudDB + 9.5) * 0.22 + loudnessPressure * 0.55, 0, 1.4) * amount;
-  const presenceStress = clamp((presenceToBodyDB + 1.0) * 0.28 + loudnessPressure * 0.65, 0, 1.6) * amount;
-  const harshStress = clamp((harshDB + 13.5) * 0.26 + loudnessPressure * 0.7, 0, 1.8) * amount;
-  const metallicStress = clamp((metallicDB + 17.5) * 0.18 + loudnessPressure * 0.8, 0, 1.7) * amount;
+  const presenceStress = clamp((presenceToBodyDB + 1.0) * 0.28 + loudnessPressure * 0.72, 0, 1.75) * amount;
+  const harshStress = clamp((harshDB + 13.5) * 0.26 + loudnessPressure * 0.82, 0, 1.95) * amount;
+  const metallicStress = clamp((metallicDB + 17.5) * 0.18 + loudnessPressure * 0.92, 0, 1.85) * amount;
   const airStress = clamp((airDB + 14.5) * 0.14 + loudnessPressure * 0.35, 0, 1.0) * amount;
 
   const moves = {
@@ -515,17 +813,19 @@ export function applyStereoStabilityGuard(buffer, options = {}) {
   }
 
   const analysis = analyzeAIGeneratedMastering(buffer);
-  const { correlation, sideToMidDB } = analysis.stereo;
+  const { correlation, sideToMidDB, lowSideToMidDB = -60, highSideToMidDB = -60 } = analysis.stereo;
   const widthExcess = clamp((sideToMidDB + 5) / 8, 0, 1);
+  const lowWidthExcess = clamp((lowSideToMidDB + 10) / 10, 0, 1);
+  const highWidthExcess = clamp((highSideToMidDB + 8) / 12, 0, 1);
   const phaseRisk = clamp((0.12 - correlation) / 0.5, 0, 1);
-  const risk = clamp(widthExcess * 0.65 + phaseRisk * 0.75, 0, 1);
+  const risk = clamp(widthExcess * 0.45 + lowWidthExcess * 0.35 + highWidthExcess * 0.2 + phaseRisk * 0.75, 0, 1);
 
   if (risk < 0.08) {
     return { buffer, analysis, moves: { sideScale: 1, bassMonoFreq: 0, risk } };
   }
 
-  const sideScale = clamp(1 - risk * 0.18 * amount, 0.78, 1);
-  const bassMonoFreq = clamp(170 + risk * 90, 170, 260);
+  const sideScale = clamp(1 - risk * 0.2 * amount, 0.76, 1);
+  const bassMonoFreq = clamp(170 + Math.max(risk, lowWidthExcess) * 95, 170, 270);
   const sideHighpass = calcBiquadCoeffs('highpass', buffer.sampleRate, bassMonoFreq, 0, 0.707);
 
   const output = createBufferLike(buffer);
@@ -556,6 +856,115 @@ export function applyStereoStabilityGuard(buffer, options = {}) {
       sideScale,
       bassMonoFreq,
       risk
+    }
+  };
+}
+
+export function getAIMasteringRecommendation(analysis, source = {}) {
+  const profile = chooseAIMasteringProfile(analysis, 'auto');
+  const { harshDB, metallicDB = -18, airDB, mudDB, subToBassDB } = analysis.profile;
+  const peaks = analysis.peaks || {};
+  const bitrateKbps = Number(source.bitrateKbps) || 0;
+  const isLossy = source.isLossy ?? (bitrateKbps > 0 && bitrateKbps < 500);
+  const lowBitrate = isLossy && bitrateKbps > 0 && bitrateKbps < 192;
+  const stereoRisk = analysis.stereo
+    ? Math.max(
+      clamp((analysis.stereo.sideToMidDB + 5) / 8, 0, 1),
+      clamp((analysis.stereo.lowSideToMidDB + 10) / 10, 0, 1),
+      clamp((analysis.stereo.highSideToMidDB + 8) / 12, 0, 1),
+      clamp((0.12 - analysis.stereo.correlation) / 0.5, 0, 1)
+    )
+    : 0;
+  const clippedOrPinned = (peaks.clipDensity ?? 0) > 0.0001 || (peaks.peakDensity ?? 0) > 0.015;
+  const fragileHighs = analysis.codecStress > 0.45 || metallicDB > -13 || harshDB > -11 || lowBitrate || (isLossy && analysis.codecStress > 0.28);
+  const limiterRisk = analysis.limiterRisk ?? 0;
+
+  let targetLufs = -12;
+  if (clippedOrPinned || limiterRisk > 0.58 || lowBitrate || peaks.loudestCrestDB < 6.5) {
+    targetLufs = -14;
+  } else if ((isLossy && analysis.codecStress > 0.25) || analysis.codecStress > 0.45 || limiterRisk > 0.38) {
+    targetLufs = -13;
+  } else if (profile.name === 'punchy' && limiterRisk < 0.25 && analysis.codecStress < 0.25) {
+    targetLufs = -11.5;
+  }
+
+  let inputGain = -3.5;
+  const truePeakHeadroom = peaks.truePeakHeadroomDB ?? 0;
+  if (clippedOrPinned || truePeakHeadroom < 0.3) {
+    inputGain = -6;
+  } else if (truePeakHeadroom < 1 || limiterRisk > 0.45) {
+    inputGain = -5;
+  } else if (truePeakHeadroom > 6 && (peaks.loudestRmsDB ?? -30) < -22) {
+    inputGain = -2.5;
+  }
+
+  let truePeakCeiling = -1;
+  if (isLossy || lowBitrate || clippedOrPinned || limiterRisk > 0.55) {
+    truePeakCeiling = -1.5;
+  }
+
+  const aiIntensity = clamp(
+    (profile.name === 'clean' ? 0.92 : 1.05) -
+    Math.max(0, limiterRisk - 0.35) * 0.22 -
+    (lowBitrate ? 0.08 : isLossy ? 0.04 : 0),
+    0.85,
+    1.12
+  );
+
+  const sibilanceProtection = clamp(
+    0.62 +
+    Math.max(0, harshDB + 14) * 0.035 +
+    Math.max(0, metallicDB + 16) * 0.018 +
+    (lowBitrate ? 0.08 : isLossy ? 0.04 : 0),
+    0.55,
+    0.9
+  );
+
+  const artifactProtection = clamp(
+    0.7 +
+    analysis.codecStress * 0.2 +
+    Math.max(0, metallicDB + 15) * 0.025 +
+    (lowBitrate ? 0.1 : isLossy ? 0.06 : 0),
+    0.65,
+    0.92
+  );
+
+  const limiterCharacter = (clippedOrPinned || fragileHighs || limiterRisk > 0.5)
+    ? 'transparent'
+    : (profile.name === 'punchy' && (peaks.loudestCrestDB ?? 0) > 9.5 ? 'punch' : 'balanced');
+
+  const stereoWidth = stereoRisk > 0.75 ? 95 : (stereoRisk < 0.15 && profile.name === 'spatial' ? 110 : 100);
+  const addAir = airDB < -24 && !fragileHighs && mudDB < -8 && !isLossy;
+  const addPunch = !clippedOrPinned && limiterRisk < 0.55 && (peaks.loudestCrestDB ?? analysis.crestDB) > 7.5;
+  const autoLevel = (peaks.dynamicSpreadDB ?? 0) > 7.5 && !clippedOrPinned;
+
+  return {
+    profile: profile.name,
+    inputGain: roundToStep(inputGain, 0.5),
+    targetLufs: roundToStep(targetLufs, 0.5),
+    truePeakCeiling: roundToStep(truePeakCeiling, 0.5),
+    limiterCharacter,
+    aiIntensity: roundToStep(aiIntensity * 100, 5),
+    sibilanceProtection: roundToStep(sibilanceProtection * 100, 5),
+    artifactProtection: roundToStep(artifactProtection * 100, 5),
+    referenceAmount: 65,
+    stereoWidth,
+    centerBass: true,
+    cleanLowEnd: true,
+    glueCompression: true,
+    deharsh: true,
+    autoLevel,
+    addPunch,
+    addAir,
+    tapeWarmth: true,
+    reasons: {
+      codecStress: analysis.codecStress,
+      limiterRisk,
+      clippedOrPinned,
+      lowBitrate,
+      stereoRisk,
+      fragileHighs,
+      subToBassDB
     }
   };
 }

@@ -1527,7 +1527,8 @@ self.onmessage = async (e) => {
             profile: settings.aiProfile || 'auto',
             intensity: settings.aiIntensity ?? 1,
             sibilanceProtection: settings.sibilanceProtection ?? 0.6,
-            artifactProtection: settings.artifactProtection ?? 0.7
+            artifactProtection: settings.artifactProtection ?? 0.7,
+            cleanLowEnd: settings.cleanLowEnd
           });
           buffer = repaired.buffer;
           aiProfile = repaired.profile || aiProfile;

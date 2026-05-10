@@ -642,6 +642,61 @@ body:not(.advanced-mode) .loudness-card {
   margin: -4px 0 10px;
 }
 
+.analysis-strip,
+.mode-strip {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.analysis-strip {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.analysis-item,
+.mode-strip span {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.035);
+  border-radius: 7px;
+  padding: 7px 8px;
+}
+
+.analysis-item span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.1;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.analysis-item strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mode-strip {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mode-strip span {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Loudness + EQ Row */
 .eq-row {
   display: grid;

@@ -6,6 +6,7 @@ import {
   applyReferenceMatch,
   applyStereoStabilityGuard,
   chooseAIMasteringProfile,
+  getAIMasteringRecommendation,
   finalizeMasteringTarget
 } from './ai-mastering.js';
 import { findTruePeak } from './true-peak.js';
@@ -67,6 +68,28 @@ function makeWidePhaseBuffer({ sampleRate = 48000, seconds = 1 }) {
   return buffer;
 }
 
+function makeQuietIntroHarshChorusBuffer({ sampleRate = 48000 }) {
+  const seconds = 5;
+  const length = sampleRate * seconds;
+  const buffer = new TestAudioBuffer({ numberOfChannels: 2, length, sampleRate });
+
+  for (let ch = 0; ch < 2; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < length; i++) {
+      const t = i / sampleRate;
+      const isChorus = t >= 3.2;
+      const level = isChorus ? 1 : 0.08;
+      const harsh = isChorus ? Math.sin(2 * Math.PI * 7800 * t) * 0.22 : 0;
+      data[i] =
+        Math.sin(2 * Math.PI * 120 * t) * 0.08 * level +
+        Math.sin(2 * Math.PI * 900 * t) * 0.08 * level +
+        harsh;
+    }
+  }
+
+  return buffer;
+}
+
 describe('AI-generated mastering repair', () => {
   beforeAll(() => {
     globalThis.AudioBuffer = TestAudioBuffer;
@@ -101,8 +124,62 @@ describe('AI-generated mastering repair', () => {
 
     const profile = chooseAIMasteringProfile(analyzeAIGeneratedMastering(buffer));
 
-    expect(['universal', 'balanced', 'natural', 'punchy', 'loud']).toContain(profile.name);
+    expect(['universal', 'balanced', 'natural', 'punchy', 'loud', 'spatial']).toContain(profile.name);
     expect(profile.maxLimiterPushDB).toBeGreaterThan(0.9);
+  });
+
+  it('keeps clean balanced sources mostly untouched by artifact gates', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [120, 0.12],
+        [900, 0.08],
+        [3000, 0.03],
+        [11000, 0.015]
+      ]
+    });
+
+    const repaired = applyAIGeneratedMasteringRepair(buffer, {
+      profile: 'universal',
+      sibilanceProtection: 0.7,
+      artifactProtection: 0.7
+    });
+
+    expect(Math.abs(repaired.moves.sibilanceCut)).toBeLessThan(0.2);
+    expect(Math.abs(repaired.moves.metallicCut)).toBeLessThan(0.25);
+  });
+
+  it('respects the clean low end control inside AI repair', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [25, 0.22],
+        [120, 0.08],
+        [900, 0.05]
+      ]
+    });
+
+    const bypassed = applyAIGeneratedMasteringRepair(buffer, {
+      profile: 'universal',
+      cleanLowEnd: false
+    });
+    const cleaned = applyAIGeneratedMasteringRepair(buffer, {
+      profile: 'universal',
+      cleanLowEnd: true
+    });
+
+    const bypassedSub = analyzeAIGeneratedMastering(bypassed.buffer).bands.sub;
+    const cleanedSub = analyzeAIGeneratedMastering(cleaned.buffer).bands.sub;
+    expect(cleanedSub).toBeLessThan(bypassedSub);
+  });
+
+  it('weights tonal analysis toward the loudest important section', () => {
+    const buffer = makeQuietIntroHarshChorusBuffer({});
+    const analysis = analyzeAIGeneratedMastering(buffer);
+    const profile = chooseAIMasteringProfile(analysis);
+
+    expect(analysis.activeRatio).toBeLessThan(1);
+    expect(analysis.loudestRatio).toBeLessThan(analysis.activeRatio);
+    expect(analysis.profile.harshDB).toBeGreaterThan(-13);
+    expect(profile.name).toBe('clean');
   });
 
   it('applies profile tone and intensity to mastering moves', () => {
@@ -198,6 +275,31 @@ describe('AI-generated mastering repair', () => {
     expect(Math.abs(matched.moves.airMatch)).toBeGreaterThan(0);
   });
 
+  it('keeps reference matching gentle on fragile high-frequency sources', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [120, 0.08],
+        [900, 0.08],
+        [7800, 0.22],
+        [10800, 0.2]
+      ]
+    });
+    const reference = makeToneBuffer({
+      frequencies: [
+        [120, 0.08],
+        [900, 0.08],
+        [12500, 0.28]
+      ]
+    });
+
+    const matched = applyReferenceMatch(source, analyzeAIGeneratedMastering(reference), {
+      amount: 1
+    });
+
+    expect(matched.moves.airMatch).toBeLessThan(0.8);
+    expect(matched.moves.harshMatch).toBeLessThan(0.5);
+  });
+
   it('applies limiter stress guard before final peak control', () => {
     const buffer = makeToneBuffer({
       frequencies: [
@@ -233,6 +335,26 @@ describe('AI-generated mastering repair', () => {
     expect(guarded.moves.risk).toBeGreaterThan(0.1);
     expect(guarded.moves.sideScale).toBeLessThan(1);
     expect(after.stereo.sideToMidDB).toBeLessThan(before.stereo.sideToMidDB);
+  });
+
+  it('recommends safer auto settings for low-bitrate pinned sources', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [90, 0.5],
+        [3800, 0.25],
+        [10800, 0.22]
+      ]
+    });
+    const analysis = analyzeAIGeneratedMastering(buffer);
+    const recommendation = getAIMasteringRecommendation(analysis, {
+      bitrateKbps: 128,
+      isLossy: true
+    });
+
+    expect(recommendation.targetLufs).toBeLessThanOrEqual(-13);
+    expect(recommendation.truePeakCeiling).toBeLessThanOrEqual(-1);
+    expect(recommendation.limiterCharacter).toBe('transparent');
+    expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(75);
   });
 
   it('keeps final calibration under the requested ceiling', () => {

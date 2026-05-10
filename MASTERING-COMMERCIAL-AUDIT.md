@@ -66,6 +66,25 @@ Expected benefit:
 - Less glassy, phasey high-end spread.
 - Better translation on phones, cars, mono speakers, and clubs.
 
+### AI Auto Decision Layer
+
+Commercial reference: Mastering assistants analyze the source first, then choose headroom, target loudness, processing intensity, and limiter behavior instead of applying one fixed preset to every song.
+
+Implemented equivalent:
+
+- Measures peak density, clipping density, loudest-window crest, dynamic spread, codec/artifact stress, limiter risk, tonal balance, and stereo risk.
+- For AI Auto, applies recommended defaults after upload before the first render.
+- Adjusts input gain, target LUFS, ceiling, limiter character, AI intensity, sibilance, metallic protection, auto level, punch, air, warmth, and stereo width.
+- Low-bitrate or already-pinned MP3s receive safer loudness, more artifact protection, and a transparent limiter.
+- Clean balanced sources avoid unnecessary de-essing/metallic cuts.
+
+Expected benefit:
+
+- AI Auto behaves more like a mastering assistant than a static preset.
+- Less distortion on damaged MP3 sources.
+- Less dulling on clean sources.
+- Better first-render settings without user tweaking.
+
 ## Next Improvement Candidates
 
 1. Auto Headroom:

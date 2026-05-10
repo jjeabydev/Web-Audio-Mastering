@@ -8,6 +8,7 @@ import {
   normalizeToLUFS,
   analyzeAIGeneratedMastering,
   chooseAIMasteringProfile,
+  getAIMasteringRecommendation,
   getAIGeneratedMasteringMoves,
   detectDCOffsetBuffer,
   removeDCOffset,
@@ -122,7 +123,9 @@ const fileState = {
   cachedRenderLufs: null,    // LUFS measured from cached buffer
   isRenderingCache: false,   // True while rendering to cache
   cacheRenderVersion: 0,     // Increments on each settings change
+  estimatedBitrateKbps: null,
   aiAnalysis: null,          // Cached source analysis for responsive live preview
+  aiAutoRecommendation: null,
   waveformMode: 'original',  // 'original' | 'processed'
   forceLivePreview: false    // True while waiting for full rendered preview to catch up
 };
@@ -214,6 +217,13 @@ const autoLevel = document.getElementById('autoLevel');
 const addPunch = document.getElementById('addPunch');
 const advancedMode = document.getElementById('advancedMode');
 const assistantPresetButtons = document.querySelectorAll('.assistant-preset');
+const analysisFocusValue = document.getElementById('analysisFocusValue');
+const analysisRiskValue = document.getElementById('analysisRiskValue');
+const analysisSafeValue = document.getElementById('analysisSafeValue');
+const modeTargetValue = document.getElementById('modeTargetValue');
+const modeInputValue = document.getElementById('modeInputValue');
+const modeCeilingValue = document.getElementById('modeCeilingValue');
+const modeLimiterValue = document.getElementById('modeLimiterValue');
 
 // Transport display elements
 const currentTimeEl = document.getElementById('currentTime');
@@ -1113,10 +1123,8 @@ async function loadReferenceFile(file) {
     setReferenceAnalysis(analysis);
     referenceMatch.checked = true;
     referenceName.textContent = file.name;
-    setAssistantPresetActive('reference');
+    applyAssistantPreset('reference');
     showToast(`Reference loaded: ${file.name}`, 'success', 3000);
-    schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
-    updateChecklist();
   } catch (error) {
     console.error('Reference analysis failed:', error);
     setReferenceAnalysis(null);
@@ -1183,6 +1191,8 @@ async function loadAudioFile(file) {
     fileState.cachedRenderBuffer = null;
     fileState.cachedRenderLufs = null;
     fileState.aiAnalysis = null;
+    fileState.estimatedBitrateKbps = null;
+    fileState.aiAutoRecommendation = null;
     fileState.waveformMode = 'original';
     fileState.cacheRenderVersion++;
 
@@ -1200,7 +1210,12 @@ async function loadAudioFile(file) {
     fileState.originalLufs = originalLufs;
     fileState.originalTruePeak = originalTruePeak;
     fileState.originalSampleRate = decodedBuffer.sampleRate;
+    fileState.estimatedBitrateKbps = Math.round((file.size * 8) / (decodedBuffer.duration * 1000));
     fileState.aiAnalysis = analyzeAIGeneratedMastering(decodedBuffer);
+    applyAIAutoRecommendation(fileState.aiAnalysis, {
+      bitrateKbps: fileState.estimatedBitrateKbps,
+      isLossy: /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(file.name)
+    });
 
     // Normalize to target LUFS using pure JavaScript
     const normalizedBuffer = normalizeToLUFS(decodedBuffer, targetLufsDb);
@@ -1559,9 +1574,8 @@ async function loadFile(file) {
       const truePeak = fileState.originalTruePeak !== undefined ? fileState.originalTruePeak.toFixed(1) : '--';
 
       // Estimate bitrate from file size (for compressed formats)
-      const fileSizeBytes = file.size;
-      const durationSecs = audioNodes.buffer.duration;
-      const estimatedBitrate = Math.round((fileSizeBytes * 8) / (durationSecs * 1000)); // kbps
+      const estimatedBitrate = fileState.estimatedBitrateKbps
+        || Math.round((file.size * 8) / (audioNodes.buffer.duration * 1000)); // kbps
 
       fileName.textContent = name;
       // Format: {type} • {bitrate} • {sample-rate} • {LUFS} • {dBTP} • {length}
@@ -1884,6 +1898,63 @@ function updateChecklist() {
     miniLive.classList.toggle('pending', Boolean(isPending));
     miniLive.textContent = isPending ? '● Updating' : '● Live';
   }
+  updateControlPanelSummary();
+}
+
+function clamp01(value) {
+  return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+}
+
+function getStereoRisk(analysis = fileState.aiAnalysis) {
+  if (!analysis?.stereo) return 0;
+  return Math.max(
+    clamp01((analysis.stereo.sideToMidDB + 5) / 8),
+    clamp01((analysis.stereo.lowSideToMidDB + 10) / 10),
+    clamp01((analysis.stereo.highSideToMidDB + 8) / 12),
+    clamp01((0.12 - analysis.stereo.correlation) / 0.5)
+  );
+}
+
+function getSourceRiskLabel(analysis = fileState.aiAnalysis) {
+  if (!analysis) return '--';
+
+  const peaks = analysis.peaks || {};
+  const limiterRisk = analysis.limiterRisk ?? 0;
+  const codecStress = analysis.codecStress ?? 0;
+  const clippedOrPinned = (peaks.clipDensity ?? 0) > 0.0001 || (peaks.peakDensity ?? 0) > 0.015;
+  const stereoRisk = getStereoRisk(analysis);
+
+  if (clippedOrPinned || limiterRisk > 0.58) return 'Limiter';
+  if (codecStress > 0.45) return 'Codec';
+  if (stereoRisk > 0.75) return 'Stereo';
+  if ((peaks.loudestCrestDB ?? 12) < 6.5) return 'Dense';
+  return 'Low';
+}
+
+function getFocusLabel(analysis = fileState.aiAnalysis) {
+  if (!analysis) return 'Waiting';
+  const activePct = Math.round((analysis.activeRatio ?? 0) * 100);
+  const loudestPct = Math.round((analysis.loudestRatio ?? 0) * 100);
+  if (loudestPct > 0) return `Loudest ${loudestPct}%`;
+  if (activePct > 0) return `Active ${activePct}%`;
+  return 'Full Track';
+}
+
+function updateControlPanelSummary() {
+  if (analysisFocusValue) analysisFocusValue.textContent = getFocusLabel();
+  if (analysisRiskValue) analysisRiskValue.textContent = getSourceRiskLabel();
+  if (analysisSafeValue) {
+    const safeOn = truePeakLimit.checked && cleanLowEnd.checked && centerBass.checked;
+    const lossySafe = !currentFile || !/\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentFile.name) || ceilingValueDb <= -1.4;
+    analysisSafeValue.textContent = safeOn && lossySafe ? 'On' : 'Check';
+  }
+  if (modeTargetValue) modeTargetValue.textContent = `Target ${targetLufsSlider.value}`;
+  if (modeInputValue) modeInputValue.textContent = `Input ${inputGainValue.toFixed(1)}`;
+  if (modeCeilingValue) modeCeilingValue.textContent = `TP ${ceilingValueDb.toFixed(1)}`;
+  if (modeLimiterValue) {
+    const label = limiterCharacter.selectedOptions?.[0]?.textContent || limiterCharacter.value;
+    modeLimiterValue.textContent = label;
+  }
 }
 
 function setAdvancedMode(enabled) {
@@ -1910,6 +1981,7 @@ function updateSliderLabels() {
   referenceAmountValue.textContent = `${referenceAmount.value}%`;
   stereoWidthValue.textContent = `${stereoWidthSlider.value}%`;
   targetLufsValue.textContent = `${targetLufsSlider.value} LUFS`;
+  updateControlPanelSummary();
 }
 
 function setTargetLufsControl(value) {
@@ -1917,29 +1989,275 @@ function setTargetLufsControl(value) {
   setTargetLufs(value);
 }
 
+function getActiveAssistantPresetName() {
+  return document.querySelector('.assistant-preset.active')?.dataset.masteringPreset || '';
+}
+
+const AI_MODE_DEFAULTS = {
+  auto: {
+    aiProfile: 'auto',
+    aiIntensity: 105,
+    sibilanceProtection: 65,
+    artifactProtection: 70,
+    inputGain: -3.5,
+    truePeakCeiling: -1,
+    targetLufs: -12,
+    limiterCharacter: 'balanced',
+    addPunch: true,
+    tapeWarmth: true,
+    addAir: false,
+    stereoWidth: 100,
+    referenceAmount: 65,
+    cleanLowEnd: true,
+    glueCompression: true,
+    deharsh: true,
+    centerBass: true,
+    autoLevel: true
+  },
+  clean: {
+    aiProfile: 'clean',
+    aiIntensity: 90,
+    sibilanceProtection: 75,
+    artifactProtection: 80,
+    inputGain: -5,
+    truePeakCeiling: -1.5,
+    targetLufs: -14,
+    limiterCharacter: 'transparent',
+    addPunch: false,
+    tapeWarmth: true,
+    addAir: false,
+    stereoWidth: 98,
+    referenceAmount: 60,
+    cleanLowEnd: true,
+    glueCompression: true,
+    deharsh: true,
+    centerBass: true,
+    autoLevel: false
+  },
+  loud: {
+    aiProfile: 'loud',
+    aiIntensity: 110,
+    sibilanceProtection: 75,
+    artifactProtection: 80,
+    inputGain: -5,
+    truePeakCeiling: -1.5,
+    targetLufs: -10.5,
+    limiterCharacter: 'dense',
+    addPunch: true,
+    tapeWarmth: true,
+    addAir: false,
+    stereoWidth: 100,
+    referenceAmount: 60,
+    cleanLowEnd: true,
+    glueCompression: true,
+    deharsh: true,
+    centerBass: true,
+    autoLevel: true
+  },
+  reference: {
+    aiProfile: 'auto',
+    aiIntensity: 100,
+    sibilanceProtection: 65,
+    artifactProtection: 70,
+    inputGain: -3.5,
+    truePeakCeiling: -1,
+    targetLufs: -12,
+    limiterCharacter: 'balanced',
+    addPunch: true,
+    tapeWarmth: true,
+    addAir: false,
+    stereoWidth: 100,
+    referenceAmount: 65,
+    cleanLowEnd: true,
+    glueCompression: true,
+    deharsh: true,
+    centerBass: true,
+    autoLevel: true
+  },
+  manual: {
+    aiProfile: 'auto',
+    aiIntensity: 100,
+    sibilanceProtection: 50,
+    artifactProtection: 50,
+    inputGain: -3.5,
+    truePeakCeiling: -1,
+    targetLufs: -14,
+    limiterCharacter: 'transparent',
+    addPunch: false,
+    tapeWarmth: false,
+    addAir: false,
+    stereoWidth: 100,
+    referenceAmount: 65,
+    cleanLowEnd: true,
+    glueCompression: true,
+    deharsh: false,
+    centerBass: true,
+    autoLevel: false
+  },
+  universal: { aiProfile: 'universal', aiIntensity: 105, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, stereoWidth: 100 },
+  fire: { aiProfile: 'fire', aiIntensity: 110, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11, limiterCharacter: 'punch', addPunch: true, tapeWarmth: true, addAir: false, stereoWidth: 100 },
+  clarity: { aiProfile: 'clarity', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: true, addAir: true, stereoWidth: 100 },
+  tape: { aiProfile: 'tape', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, stereoWidth: 100 },
+  natural: { aiProfile: 'natural', aiIntensity: 95, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, stereoWidth: 100 },
+  spatial: { aiProfile: 'spatial', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: true, addAir: false, stereoWidth: 105 },
+  cinematic: { aiProfile: 'cinematic', aiIntensity: 100, sibilanceProtection: 65, artifactProtection: 70, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, stereoWidth: 102 },
+  punchy: { aiProfile: 'punchy', aiIntensity: 105, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11.5, limiterCharacter: 'punch', addPunch: true, tapeWarmth: true, addAir: false, stereoWidth: 100 },
+  warm: { aiProfile: 'warm', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, stereoWidth: 100 },
+  vocal: { aiProfile: 'vocal', aiIntensity: 100, sibilanceProtection: 80, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, stereoWidth: 98 },
+  bass: { aiProfile: 'bass', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, stereoWidth: 98 }
+};
+
+function refineModeDefaultsForCurrentSource(defaults) {
+  const refined = { ...defaults };
+  const analysis = fileState.aiAnalysis;
+  const currentName = currentFile?.name || '';
+  const isLossy = /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentName);
+
+  if (isLossy) {
+    refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
+    refined.sibilanceProtection = Math.max(refined.sibilanceProtection ?? 65, 70);
+    refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 75);
+    refined.addAir = false;
+  }
+
+  if (!analysis) return refined;
+
+  const peaks = analysis.peaks || {};
+  const clippedOrPinned = (peaks.clipDensity ?? 0) > 0.0001 || (peaks.peakDensity ?? 0) > 0.015;
+  const limiterRisk = analysis.limiterRisk ?? 0;
+  const codecStress = analysis.codecStress ?? 0;
+  const stereoRisk = getStereoRisk(analysis);
+
+  if (clippedOrPinned || limiterRisk > 0.55 || (peaks.loudestCrestDB ?? 12) < 6.5) {
+    refined.inputGain = Math.min(refined.inputGain ?? -3.5, -5.5);
+    refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
+    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -13.5);
+    refined.limiterCharacter = 'transparent';
+    refined.addPunch = false;
+  } else if (limiterRisk > 0.38 || codecStress > 0.45) {
+    refined.inputGain = Math.min(refined.inputGain ?? -3.5, -5);
+    refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
+    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -12.5);
+  }
+
+  if (codecStress > 0.42) {
+    refined.aiIntensity = Math.min(refined.aiIntensity ?? 100, 100);
+    refined.sibilanceProtection = Math.max(refined.sibilanceProtection ?? 65, 80);
+    refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 85);
+    refined.limiterCharacter = 'transparent';
+    refined.addAir = false;
+  }
+
+  if (stereoRisk > 0.75) {
+    refined.stereoWidth = Math.min(refined.stereoWidth ?? 100, 95);
+    refined.centerBass = true;
+  }
+
+  return refined;
+}
+
+function applyReferenceTargetDefaults(defaults) {
+  const referenceAnalysis = getCurrentSettings().referenceAnalysis;
+  if (!referenceAnalysis) return defaults;
+
+  const refined = { ...defaults };
+  const refLufs = referenceAnalysis.lufs;
+  if (Number.isFinite(refLufs)) {
+    const safeReferenceTarget = Math.max(-13.5, Math.min(-10.5, refLufs));
+    refined.targetLufs = Math.min(refined.targetLufs ?? -12, safeReferenceTarget);
+  }
+
+  const refStereo = referenceAnalysis.stereo;
+  if (refStereo) {
+    const refIsWideButStable = refStereo.sideToMidDB < -7 && refStereo.correlation > 0.25;
+    const refIsRisky = getStereoRisk(referenceAnalysis) > 0.65;
+    if (refIsWideButStable && !refIsRisky) {
+      refined.stereoWidth = Math.min(108, Math.max(refined.stereoWidth ?? 100, 104));
+    } else if (refIsRisky) {
+      refined.stereoWidth = Math.min(refined.stereoWidth ?? 100, 96);
+    }
+  }
+
+  refined.referenceAmount = Math.min(refined.referenceAmount ?? 65, 70);
+  return refined;
+}
+
+function applyModeDefaults(defaults, options = {}) {
+  const baseDefaults = options.referenceTarget
+    ? applyReferenceTargetDefaults({ ...AI_MODE_DEFAULTS.auto, ...defaults })
+    : { ...AI_MODE_DEFAULTS.auto, ...defaults };
+  const merged = refineModeDefaultsForCurrentSource(baseDefaults);
+  aiEnhance.checked = options.aiEnhance ?? true;
+  normalizeLoudness.checked = true;
+  truePeakLimit.checked = true;
+  cleanLowEnd.checked = merged.cleanLowEnd;
+  glueCompression.checked = merged.glueCompression;
+  deharsh.checked = merged.deharsh;
+  centerBass.checked = merged.centerBass;
+  autoLevel.checked = merged.autoLevel;
+  aiProfile.value = merged.aiProfile;
+  aiIntensity.value = String(merged.aiIntensity);
+  sibilanceProtection.value = String(merged.sibilanceProtection);
+  artifactProtection.value = String(merged.artifactProtection);
+  referenceAmount.value = String(merged.referenceAmount);
+  setTargetLufsControl(merged.targetLufs);
+  if (faders.inputGain && Number.isFinite(merged.inputGain)) {
+    faders.inputGain.setValue(merged.inputGain, true);
+  }
+  if (faders.ceiling && Number.isFinite(merged.truePeakCeiling)) {
+    faders.ceiling.setValue(merged.truePeakCeiling, true);
+  }
+  limiterCharacter.value = merged.limiterCharacter;
+  addPunch.checked = merged.addPunch;
+  tapeWarmth.checked = merged.tapeWarmth;
+  addAir.checked = merged.addAir;
+  stereoWidthSlider.value = String(merged.stereoWidth);
+  updateSliderLabels();
+}
+
+function applyAIAutoRecommendation(analysis, source = {}, options = {}) {
+  if (!analysis || (!options.force && getActiveAssistantPresetName() !== 'ai-auto')) return null;
+
+  const recommendation = options.recommendation || getAIMasteringRecommendation(analysis, source);
+  fileState.aiAutoRecommendation = recommendation;
+
+  aiEnhance.checked = true;
+  aiProfile.value = 'auto';
+  normalizeLoudness.checked = true;
+  truePeakLimit.checked = true;
+  cleanLowEnd.checked = recommendation.cleanLowEnd;
+  glueCompression.checked = recommendation.glueCompression;
+  deharsh.checked = recommendation.deharsh;
+  centerBass.checked = recommendation.centerBass;
+  autoLevel.checked = recommendation.autoLevel;
+  addPunch.checked = recommendation.addPunch;
+  addAir.checked = recommendation.addAir;
+  tapeWarmth.checked = recommendation.tapeWarmth;
+  limiterCharacter.value = recommendation.limiterCharacter;
+  aiIntensity.value = String(recommendation.aiIntensity);
+  sibilanceProtection.value = String(recommendation.sibilanceProtection);
+  artifactProtection.value = String(recommendation.artifactProtection);
+  referenceAmount.value = String(recommendation.referenceAmount);
+  stereoWidthSlider.value = String(recommendation.stereoWidth);
+  setTargetLufsControl(recommendation.targetLufs);
+
+  if (faders.inputGain) {
+    faders.inputGain.setValue(recommendation.inputGain, true);
+  }
+  if (faders.ceiling) {
+    faders.ceiling.setValue(recommendation.truePeakCeiling, true);
+  }
+
+  updateSliderLabels();
+  updateChecklist();
+  console.log('[AI Auto] Applied analysis recommendation:', recommendation);
+  return recommendation;
+}
+
 function applyAssistantPreset(name) {
   if (name === 'manual') {
-    aiEnhance.checked = false;
     referenceMatch.checked = false;
-    normalizeLoudness.checked = true;
-    truePeakLimit.checked = true;
-    cleanLowEnd.checked = true;
-    glueCompression.checked = true;
-    deharsh.checked = false;
-    centerBass.checked = true;
-    autoLevel.checked = false;
-    aiProfile.value = 'auto';
-    aiIntensity.value = '100';
-    sibilanceProtection.value = '50';
-    artifactProtection.value = '50';
-    referenceAmount.value = '65';
-    setTargetLufsControl(-14);
-    limiterCharacter.value = 'transparent';
-    addPunch.checked = false;
-    tapeWarmth.checked = false;
-    addAir.checked = false;
-    stereoWidthSlider.value = '100';
-    updateSliderLabels();
+    applyModeDefaults(AI_MODE_DEFAULTS.manual, { aiEnhance: false });
     setAssistantPresetActive('manual');
     schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
     updateOutputPresetButtons(outputPresets);
@@ -1947,69 +2265,72 @@ function applyAssistantPreset(name) {
     return;
   }
 
-  aiEnhance.checked = true;
-  normalizeLoudness.checked = true;
-  truePeakLimit.checked = true;
-  cleanLowEnd.checked = true;
-  glueCompression.checked = true;
-  deharsh.checked = true;
-  centerBass.checked = true;
-  autoLevel.checked = true;
+  if (name === 'ai-auto' && fileState.aiAnalysis) {
+    setAssistantPresetActive('ai-auto');
+    applyAIAutoRecommendation(
+      fileState.aiAnalysis,
+      {
+        bitrateKbps: fileState.estimatedBitrateKbps,
+        isLossy: currentFile ? /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentFile.name) : true
+      },
+      {
+        force: true,
+        recommendation: fileState.aiAutoRecommendation
+      }
+    );
+    referenceMatch.checked = false;
+    schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+    updateOutputPresetButtons(outputPresets);
+    updateChecklist();
+    return;
+  }
 
   if (name === 'ai-clean') {
-    aiProfile.value = 'clean';
-    aiIntensity.value = '90';
-    sibilanceProtection.value = '70';
-    artifactProtection.value = '70';
-    setTargetLufsControl(-14);
-    limiterCharacter.value = 'transparent';
-    addPunch.checked = false;
-    tapeWarmth.checked = false;
-    addAir.checked = false;
+    applyModeDefaults(AI_MODE_DEFAULTS.clean);
     referenceMatch.checked = false;
   } else if (name === 'ai-loud') {
-    aiProfile.value = 'loud';
-    aiIntensity.value = '115';
-    sibilanceProtection.value = '70';
-    artifactProtection.value = '70';
-    setTargetLufsControl(-9);
-    limiterCharacter.value = 'dense';
-    addPunch.checked = true;
-    tapeWarmth.checked = true;
-    addAir.checked = false;
+    applyModeDefaults(AI_MODE_DEFAULTS.loud);
     referenceMatch.checked = false;
   } else if (name === 'reference') {
-    aiProfile.value = 'auto';
-    aiIntensity.value = '100';
-    sibilanceProtection.value = '65';
-    artifactProtection.value = '70';
-    referenceAmount.value = '65';
-    setTargetLufsControl(-12);
-    limiterCharacter.value = 'balanced';
-    addPunch.checked = true;
-    tapeWarmth.checked = true;
-    addAir.checked = false;
+    applyModeDefaults(AI_MODE_DEFAULTS.reference, { referenceTarget: true });
     if (referenceName.textContent === 'No reference') {
       selectReferenceBtn.click();
     } else {
       referenceMatch.checked = true;
     }
   } else {
-    aiProfile.value = 'auto';
-    aiIntensity.value = '105';
-    sibilanceProtection.value = '65';
-    artifactProtection.value = '70';
-    setTargetLufsControl(-12);
-    limiterCharacter.value = 'balanced';
-    addPunch.checked = true;
-    tapeWarmth.checked = true;
-    addAir.checked = false;
+    applyModeDefaults(AI_MODE_DEFAULTS.auto);
     referenceMatch.checked = false;
   }
 
-  stereoWidthSlider.value = '100';
-  updateSliderLabels();
   setAssistantPresetActive(name);
+  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  updateOutputPresetButtons(outputPresets);
+  updateChecklist();
+}
+
+function applyAIProfileSelectionDefaults() {
+  const selectedProfile = aiProfile.value || 'auto';
+
+  if (selectedProfile === 'auto' && fileState.aiAnalysis) {
+    applyAssistantPreset('ai-auto');
+    return;
+  }
+
+  const defaults = AI_MODE_DEFAULTS[selectedProfile] || AI_MODE_DEFAULTS.auto;
+  referenceMatch.checked = false;
+  applyModeDefaults(defaults);
+
+  if (selectedProfile === 'clean') {
+    setAssistantPresetActive('ai-clean');
+  } else if (selectedProfile === 'loud') {
+    setAssistantPresetActive('ai-loud');
+  } else if (selectedProfile === 'auto') {
+    setAssistantPresetActive('ai-auto');
+  } else {
+    setAssistantPresetActive('custom');
+  }
+
   schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
   updateOutputPresetButtons(outputPresets);
   updateChecklist();
@@ -2054,12 +2375,16 @@ assistantPresetButtons.forEach(btn => {
 
 // Deharsh, Exciter (Add Air), Tape Warmth, and Multiband Transient (Add Punch) require re-processing the buffer
 // These are applied offline for preview/export parity
-[deharsh, aiEnhance, aiProfile, addAir, tapeWarmth, addPunch].forEach(el => {
+[deharsh, aiEnhance, addAir, tapeWarmth, addPunch].forEach(el => {
   el.addEventListener('change', () => {
     markCustomPreset();
     processEffects();
     updateChecklist();
   });
+});
+
+aiProfile.addEventListener('change', () => {
+  applyAIProfileSelectionDefaults();
 });
 
 aiIntensity.addEventListener('input', () => {
@@ -2102,6 +2427,12 @@ artifactProtection.addEventListener('change', () => {
 });
 
 referenceMatch.addEventListener('change', () => {
+  if (referenceMatch.checked && referenceName.textContent === 'No reference') {
+    referenceMatch.checked = false;
+    selectReferenceBtn.click();
+    updateChecklist();
+    return;
+  }
   setAssistantPresetActive(referenceMatch.checked ? 'reference' : 'custom');
   schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
   updateChecklist();
@@ -2109,7 +2440,7 @@ referenceMatch.addEventListener('change', () => {
 
 referenceAmount.addEventListener('input', () => {
   referenceAmountValue.textContent = `${referenceAmount.value}%`;
-  setAssistantPresetActive(referenceMatch.checked ? 'reference' : 'custom');
+  setAssistantPresetActive(referenceMatch.checked && referenceName.textContent !== 'No reference' ? 'reference' : 'custom');
   if (playerState.isPlaying && !playerState.isBypassed) {
     schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
   }
@@ -2220,6 +2551,7 @@ targetLufsSlider.addEventListener('input', () => {
   // Update display immediately
   setTargetLufs(newValue);
   targetLufsValue.textContent = `${newValue} LUFS`;
+  updateControlPanelSummary();
 
   if (lufsDebounceTimeout) {
     clearTimeout(lufsDebounceTimeout);
@@ -2356,6 +2688,7 @@ window.addEventListener('beforeunload', () => {
 initFaders({
   onInputGainChange: (val) => {
     updateInputGain();
+    updateControlPanelSummary();
     // Keep live chain responsive while dragging; defer cache rebuild to commit.
     updateAudioChain({ scheduleCache: false });
   },
@@ -2363,6 +2696,7 @@ initFaders({
     updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
   },
   onCeilingChange: () => {
+    updateControlPanelSummary();
     // Live preview updates immediately; defer cache rebuild to commit.
     updateAudioChain({ scheduleCache: false });
   },

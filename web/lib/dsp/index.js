@@ -181,6 +181,7 @@ export {
   AI_MASTERING_PROFILES,
   analyzeAIGeneratedMastering,
   chooseAIMasteringProfile,
+  getAIMasteringRecommendation,
   getAIGeneratedMasteringMoves,
   applyAIGeneratedMasteringRepair,
   applyReferenceMatch,
