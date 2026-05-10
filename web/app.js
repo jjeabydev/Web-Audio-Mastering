@@ -2047,6 +2047,7 @@ function setAssistantPresetActive(name) {
     btn.classList.toggle('hidden', isCustomButton && name !== 'custom');
     btn.classList.toggle('active', btn.dataset.masteringPreset === name);
   });
+  updateControlPanelSummary();
 }
 
 function markCustomPreset() {
