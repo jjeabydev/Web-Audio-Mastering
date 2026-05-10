@@ -13,7 +13,9 @@ import {
   applyMasteringSoftClip,
   applyLookaheadLimiter,
   applyFinalFilters,
+  getAdaptiveFinalFilterOptions,
   adjustStereoWidth,
+  analyzeAIGeneratedMastering,
   applyAIGeneratedMasteringRepair,
   applyReferenceMatch,
   applyLimiterStressGuard,
@@ -192,12 +194,14 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     }
   }
 
-  // 5. Apply final High Cut (18kHz LPF 6dB/oct)
+  // 5. Apply adaptive final air cleanup.
   // Note: HPF (Clean Low End) is already handled by the WebAudio highpass node in the offline render graph.
-  console.log(`${logPrefix} Applying final LPF...`);
+  const finalFilterAnalysis = settings.aiEnhance !== false ? analyzeAIGeneratedMastering(renderedBuffer) : null;
+  const finalFilterOptions = getAdaptiveFinalFilterOptions(finalFilterAnalysis, settings);
+  console.log(`${logPrefix} Applying final air cleanup...`, finalFilterOptions);
   renderedBuffer = applyFinalFilters(renderedBuffer, {
     highpass: false,
-    lowpass: true
+    ...finalFilterOptions
   });
   if (onProgress) onProgress(0.65);
 

@@ -25,8 +25,10 @@ import {
   applyMultibandTransient,
   processHybridDynamic,
   applyFinalFilters,
+  getAdaptiveFinalFilterOptions,
   applyMasteringSoftClip,
   applyLookaheadLimiter,
+  analyzeAIGeneratedMastering,
   applyAIGeneratedMasteringRepair,
   applyReferenceMatch,
   applyLimiterStressGuard,
@@ -1623,12 +1625,14 @@ self.onmessage = async (e) => {
         // --- EXPORT MODE ONLY (Live Chain Simulation) ---
         // Includes: Final Filters, EQ, Cut Mud, Glue Comp, Soft Clip, Limit
 
-        // 5. Final Filters (HPF 30Hz / LPF 18k)
-        // HPF is controlled by Clean Low End; LPF is always applied as final cleanup.
+        // 5. Final Filters (HPF 30Hz / adaptive air cleanup)
+        // HPF is controlled by Clean Low End; LPF opens up on clean or already dark sources.
         sendProgress(id, 0.60, 'Applying final filters...');
+        const finalFilterAnalysis = settings.aiEnhance !== false ? analyzeAIGeneratedMastering(buffer) : null;
+        const finalFilterOptions = getAdaptiveFinalFilterOptions(finalFilterAnalysis, settings);
         buffer = applyFinalFilters(buffer, {
           highpass: !!settings.cleanLowEnd,
-          lowpass: true
+          ...finalFilterOptions
         });
 
         // 6. EQ (5-Band) + Cut Mud

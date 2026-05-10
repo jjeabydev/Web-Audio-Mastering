@@ -103,6 +103,7 @@ export function applyFinalFilters(buffer, options = {}) {
   } = options;
 
   const sampleRate = buffer.sampleRate;
+  const safeLowpassFreq = Math.min(lowpassFreq, sampleRate * 0.46);
   const numChannels = buffer.numberOfChannels;
   const length = buffer.length;
 
@@ -123,10 +124,30 @@ export function applyFinalFilters(buffer, options = {}) {
     }
 
     if (lowpass) {
-      applyOnePoleLP(output, lowpassFreq, sampleRate);
+      applyOnePoleLP(output, safeLowpassFreq, sampleRate);
     }
   }
 
   return outputBuffer;
 }
 
+export function getAdaptiveFinalFilterOptions(analysis, settings = {}) {
+  const profile = analysis?.profile || {};
+  const codecStress = analysis?.codecStress ?? 0;
+  const limiterRisk = analysis?.limiterRisk ?? 0;
+  const harshDB = profile.harshDB ?? -18;
+  const metallicDB = profile.metallicDB ?? -18;
+  const airDB = profile.airDB ?? -18;
+  const fragileHighs = codecStress > 0.45 || limiterRisk > 0.55 || harshDB > -11.5 || metallicDB > -13.5;
+  const airDeficit = airDB < -23 && harshDB < -13 && metallicDB < -15;
+
+  if (fragileHighs) {
+    return { lowpass: true, lowpassFreq: 18000 };
+  }
+
+  if (airDeficit || settings.addAir) {
+    return { lowpass: false, lowpassFreq: 20500 };
+  }
+
+  return { lowpass: true, lowpassFreq: 20500 };
+}

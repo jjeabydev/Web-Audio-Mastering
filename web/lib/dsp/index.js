@@ -48,7 +48,8 @@ export {
 export {
   applyBiquadToChannel,
   applyOnePoleLP,
-  applyFinalFilters
+  applyFinalFilters,
+  getAdaptiveFinalFilterOptions
 } from './final-filters.js';
 
 // Normalizer

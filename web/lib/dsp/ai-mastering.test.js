@@ -68,6 +68,23 @@ function makeWidePhaseBuffer({ sampleRate = 48000, seconds = 1 }) {
   return buffer;
 }
 
+function makeStableWideBuffer({ sampleRate = 48000, seconds = 1 }) {
+  const length = sampleRate * seconds;
+  const buffer = new TestAudioBuffer({ numberOfChannels: 2, length, sampleRate });
+  const left = buffer.getChannelData(0);
+  const right = buffer.getChannelData(1);
+
+  for (let i = 0; i < length; i++) {
+    const t = i / sampleRate;
+    const mid = Math.sin(2 * Math.PI * 900 * t) * 0.12;
+    const side = Math.sin(2 * Math.PI * 3400 * t) * 0.045;
+    left[i] = mid + side;
+    right[i] = mid - side;
+  }
+
+  return buffer;
+}
+
 function makeQuietIntroHarshChorusBuffer({ sampleRate = 48000 }) {
   const seconds = 5;
   const length = sampleRate * seconds;
@@ -289,6 +306,28 @@ describe('AI-generated mastering repair', () => {
     expect(after.bands.metallic).toBeLessThan(before.bands.metallic);
   });
 
+  it('keeps dark non-fragile sources from becoming muffled', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [120, 0.08],
+        [450, 0.06],
+        [900, 0.08],
+        [3600, 0.01],
+        [12500, 0.006]
+      ]
+    });
+
+    const repaired = applyAIGeneratedMasteringRepair(buffer, {
+      profile: 'clarity',
+      intensity: 1,
+      sibilanceProtection: 0.7,
+      artifactProtection: 0.7
+    });
+
+    expect(repaired.moves.presenceCut).toBeGreaterThan(0);
+    expect(repaired.moves.airShelf).toBeGreaterThan(0);
+  });
+
   it('moves tonal balance toward a reference without fully copying it', () => {
     const source = makeToneBuffer({
       frequencies: [
@@ -337,6 +376,27 @@ describe('AI-generated mastering repair', () => {
 
     expect(matched.moves.airMatch).toBeLessThan(0.8);
     expect(matched.moves.harshMatch).toBeLessThan(0.5);
+  });
+
+  it('matches reference stereo width gently when the reference image is stable', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [120, 0.08],
+        [900, 0.08],
+        [3800, 0.03]
+      ]
+    });
+    const reference = makeStableWideBuffer({});
+    const before = analyzeAIGeneratedMastering(source);
+
+    const matched = applyReferenceMatch(source, analyzeAIGeneratedMastering(reference), {
+      amount: 1
+    });
+    const after = analyzeAIGeneratedMastering(matched.buffer);
+
+    expect(matched.moves.stereoWidthScale).toBeGreaterThan(1);
+    expect(matched.moves.stereoWidthScale).toBeLessThanOrEqual(1.08);
+    expect(after.stereo.sideToMidDB).toBeGreaterThan(before.stereo.sideToMidDB);
   });
 
   it('applies limiter stress guard before final peak control', () => {
@@ -394,6 +454,28 @@ describe('AI-generated mastering repair', () => {
     expect(recommendation.truePeakCeiling).toBeLessThanOrEqual(-1);
     expect(recommendation.limiterCharacter).toBe('transparent');
     expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(75);
+  });
+
+  it('recommends clarity and air for dark but safe lossy sources', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [120, 0.08],
+        [450, 0.08],
+        [900, 0.09],
+        [3600, 0.01],
+        [12500, 0.004]
+      ]
+    });
+    const analysis = analyzeAIGeneratedMastering(buffer);
+    const profile = chooseAIMasteringProfile(analysis);
+    const recommendation = getAIMasteringRecommendation(analysis, {
+      bitrateKbps: 256,
+      isLossy: true
+    });
+
+    expect(profile.name).toBe('clarity');
+    expect(recommendation.addAir).toBe(true);
+    expect(recommendation.artifactProtection).toBeLessThanOrEqual(80);
   });
 
   it('keeps final calibration under the requested ceiling', () => {

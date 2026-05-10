@@ -12,6 +12,7 @@ import { findTruePeak } from './true-peak.js';
 import { measureLUFS } from './lufs.js';
 import { applyGain } from './normalizer.js';
 import { applyLookaheadLimiter } from './limiter.js';
+import { adjustStereoWidth } from './stereo.js';
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -357,6 +358,16 @@ function rangedRms(samples, ranges) {
   return Math.sqrt(sum / Math.max(1, count));
 }
 
+function getStereoImageRisk(stereo) {
+  if (!stereo) return 0;
+  return Math.max(
+    clamp((stereo.sideToMidDB + 5) / 8, 0, 1),
+    clamp(((stereo.lowSideToMidDB ?? -60) + 10) / 10, 0, 1),
+    clamp(((stereo.highSideToMidDB ?? -60) + 8) / 12, 0, 1),
+    clamp((0.12 - stereo.correlation) / 0.5, 0, 1)
+  );
+}
+
 function bandRmsActive(mono, sampleRate, frequency, Q, activeRanges) {
   const coeffs = calcBiquadCoeffs('bandpass', sampleRate, frequency, 0, Q);
   return rangedRms(applyBiquadFilter(mono, coeffs), activeRanges);
@@ -598,14 +609,7 @@ export function chooseAIMasteringProfile(analysis, requestedProfile = 'auto') {
 
   const { mudDB, harshDB, metallicDB = -18, airDB, subToBassDB, presenceToBodyDB } = analysis.profile;
   const { peakDensity = 0, clipDensity = 0, loudestCrestDB = analysis.crestDB, dynamicSpreadDB = 0 } = analysis.peaks || {};
-  const stereoRisk = analysis.stereo
-    ? Math.max(
-      clamp((analysis.stereo.sideToMidDB + 5) / 8, 0, 1),
-      clamp((analysis.stereo.lowSideToMidDB + 10) / 10, 0, 1),
-      clamp((analysis.stereo.highSideToMidDB + 8) / 12, 0, 1),
-      clamp((0.12 - analysis.stereo.correlation) / 0.5, 0, 1)
-    )
-    : 0;
+  const stereoRisk = getStereoImageRisk(analysis.stereo);
 
   if (
     analysis.codecStress > 0.55 ||
@@ -624,16 +628,16 @@ export function chooseAIMasteringProfile(analysis, requestedProfile = 'auto') {
     return { name: 'clean', ...AI_MASTERING_PROFILES.clean };
   }
 
+  if ((mudDB > -7.5 || (airDB < -23 && presenceToBodyDB < -10)) && harshDB < -12 && metallicDB < -14) {
+    return { name: 'clarity', ...AI_MASTERING_PROFILES.clarity };
+  }
+
   if (stereoRisk < 0.18 && analysis.stereo?.sideToMidDB < -14 && harshDB < -12 && metallicDB < -14 && airDB < -21) {
     return { name: 'spatial', ...AI_MASTERING_PROFILES.spatial };
   }
 
   if (dynamicSpreadDB > 12 && analysis.crestDB > 13.5) {
     return { name: 'cinematic', ...AI_MASTERING_PROFILES.cinematic };
-  }
-
-  if (mudDB > -7.5 && harshDB < -12) {
-    return { name: 'clarity', ...AI_MASTERING_PROFILES.clarity };
   }
 
   if (analysis.crestDB > 13 && subToBassDB < -5 && harshDB < -13 && analysis.limiterRisk < 0.4) {
@@ -653,8 +657,17 @@ export function getAIGeneratedMasteringMoves(analysis, strength = 1, profile = A
   const sibilanceAmount = clamp(options.sibilanceProtection ?? 0.6, 0, 1);
   const artifactAmount = clamp(options.artifactProtection ?? 0.7, 0, 1);
   const lowCutFreq = clamp(30 + Math.max(0, subToBassDB + 1) * 4, 30, 42);
+  const fragileHighs = (analysis.codecStress ?? 0) > 0.45 || harshDB > -11.5 || metallicDB > -13.5;
+  const muffleRisk = clamp(
+    Math.max(0, -23 - airDB) * 0.12 +
+    Math.max(0, -2.5 - presenceToBodyDB) * 0.18 +
+    Math.max(0, mudDB + 7.5) * 0.08,
+    0,
+    1
+  );
   const mudCut = clamp((-clamp((mudDB + 10) * 0.35, 0, 2.8) + (tone.mud || 0)) * strength, -3.2, 0.6);
-  const presenceCut = clamp((-clamp((presenceToBodyDB + 1.5) * 0.4, 0, 2.2) + (tone.presence || 0)) * strength, -2.8, 0.9);
+  const presenceLift = fragileHighs ? 0 : muffleRisk * 0.55;
+  const presenceCut = clamp((-clamp((presenceToBodyDB + 1.5) * 0.4, 0, 2.2) + (tone.presence || 0) + presenceLift) * strength, -2.8, 1.2);
   const sibilanceRisk = clamp((harshDB + 15) * 0.28 + Math.max(0, metallicDB + 17) * 0.08, 0, 3.1);
   const sibilanceCut = -clamp(sibilanceRisk * (0.45 + sibilanceAmount * 0.75) * strength, 0, 3.4);
   const harshRisk = clamp((harshDB + 13) * 0.55, 0, 3.5);
@@ -666,7 +679,8 @@ export function getAIGeneratedMasteringMoves(analysis, strength = 1, profile = A
     3.2
   );
   const metallicCut = -clamp(metallicBase * strength, 0, 4.2);
-  const airShelf = clamp((clamp((-18 - airDB) * 0.16, -1.2, 1.2) + (tone.air || 0) + metallicCut * 0.08) * strength, -1.8, 1.4);
+  const opennessLift = fragileHighs ? 0 : muffleRisk * 0.75;
+  const airShelf = clamp((clamp((-18 - airDB) * 0.16, -1.2, 1.2) + (tone.air || 0) + metallicCut * 0.08 + opennessLift) * strength, -1.8, 1.7);
   const bassDeficit = clamp((-3 - bassToBodyDB) * 0.18, 0, 1.1);
   const lowHeadroomRisk = clamp((analysis.limiterRisk ?? 0) + Math.max(0, subToBassDB + 1) * 0.1, 0, 1);
   const bassLift = clamp((bassDeficit * (1 - lowHeadroomRisk * 0.55) + (tone.bass || 0)) * strength, -0.8, 1.8);
@@ -732,6 +746,8 @@ export function applyReferenceMatch(buffer, referenceAnalysis, options = {}) {
   const limiterRisk = analysis.limiterRisk ?? 0;
   const positiveMatchScale = fragileHighs ? 0.45 : 1;
   const limiterMatchScale = limiterRisk > 0.45 ? 0.65 : 1;
+  const sourceStereoRisk = getStereoImageRisk(analysis.stereo);
+  const referenceStereoRisk = getStereoImageRisk(referenceAnalysis.stereo);
 
   const bassShelf = clamp((target.subToBassDB - source.subToBassDB) * -0.18 * amount, -1.2, 1.2);
   const mudMatch = clamp((target.mudDB - source.mudDB) * 0.32 * amount, -2.2, 1.4);
@@ -741,6 +757,11 @@ export function applyReferenceMatch(buffer, referenceAnalysis, options = {}) {
   const presenceMatch = rawPresenceMatch > 0 ? rawPresenceMatch * positiveMatchScale * limiterMatchScale : rawPresenceMatch;
   const harshMatch = rawHarshMatch > 0 ? rawHarshMatch * positiveMatchScale * limiterMatchScale : rawHarshMatch;
   const airMatch = rawAirMatch > 0 ? rawAirMatch * positiveMatchScale * limiterMatchScale : rawAirMatch;
+  const rawStereoMatch = analysis.stereo && referenceAnalysis.stereo
+    ? (referenceAnalysis.stereo.sideToMidDB - analysis.stereo.sideToMidDB) * 0.018 * amount
+    : 0;
+  const stereoWidenScale = (fragileHighs || sourceStereoRisk > 0.55 || referenceStereoRisk > 0.55) ? 0.35 : 1;
+  const stereoWidthScale = clamp(1 + (rawStereoMatch > 0 ? rawStereoMatch * stereoWidenScale : rawStereoMatch), 0.92, 1.08);
 
   let output = buffer;
   output = applyFilterToBuffer(output, 'lowshelf', 95, bassShelf, 0.7);
@@ -748,6 +769,9 @@ export function applyReferenceMatch(buffer, referenceAnalysis, options = {}) {
   output = applyFilterToBuffer(output, 'peaking', 3900, presenceMatch, 1.0);
   output = applyFilterToBuffer(output, 'peaking', 7800, harshMatch, 1.5);
   output = applyFilterToBuffer(output, 'highshelf', 12500, airMatch, 0.75);
+  if (output.numberOfChannels === 2 && Math.abs(stereoWidthScale - 1) > 0.01) {
+    output = adjustStereoWidth(output, stereoWidthScale, true, 200);
+  }
 
   return {
     buffer: output,
@@ -757,7 +781,8 @@ export function applyReferenceMatch(buffer, referenceAnalysis, options = {}) {
       mudMatch,
       presenceMatch,
       harshMatch,
-      airMatch
+      airMatch,
+      stereoWidthScale
     }
   };
 }
@@ -867,18 +892,13 @@ export function applyStereoStabilityGuard(buffer, options = {}) {
 
 export function getAIMasteringRecommendation(analysis, source = {}) {
   const profile = chooseAIMasteringProfile(analysis, 'auto');
-  const { harshDB, metallicDB = -18, airDB, mudDB, subToBassDB } = analysis.profile;
+  const { harshDB, metallicDB = -18, airDB, mudDB, subToBassDB, presenceToBodyDB = 0 } = analysis.profile;
   const peaks = analysis.peaks || {};
   const bitrateKbps = Number(source.bitrateKbps) || 0;
   const isLossy = source.isLossy ?? (bitrateKbps > 0 && bitrateKbps < 500);
   const lowBitrate = isLossy && bitrateKbps > 0 && bitrateKbps < 192;
   const stereoRisk = analysis.stereo
-    ? Math.max(
-      clamp((analysis.stereo.sideToMidDB + 5) / 8, 0, 1),
-      clamp((analysis.stereo.lowSideToMidDB + 10) / 10, 0, 1),
-      clamp((analysis.stereo.highSideToMidDB + 8) / 12, 0, 1),
-      clamp((0.12 - analysis.stereo.correlation) / 0.5, 0, 1)
-    )
+    ? getStereoImageRisk(analysis.stereo)
     : 0;
   const clippedOrPinned = (peaks.clipDensity ?? 0) > 0.0001 || (peaks.peakDensity ?? 0) > 0.015;
   const fragileHighs = analysis.codecStress > 0.45 || metallicDB > -13 || harshDB > -11 || lowBitrate || (isLossy && analysis.codecStress > 0.28);
@@ -939,7 +959,8 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
     : (profile.name === 'punchy' && (peaks.loudestCrestDB ?? 0) > 9.5 ? 'punch' : 'balanced');
 
   const stereoWidth = stereoRisk > 0.75 ? 95 : (stereoRisk < 0.15 && profile.name === 'spatial' ? 110 : 100);
-  const addAir = airDB < -24 && !fragileHighs && mudDB < -8 && !isLossy;
+  const darkButSafe = airDB < -24 && presenceToBodyDB < -10 && !fragileHighs && limiterRisk < 0.35 && analysis.codecStress < 0.28;
+  const addAir = darkButSafe && !lowBitrate;
   const addPunch = !clippedOrPinned && limiterRisk < 0.55 && (peaks.loudestCrestDB ?? analysis.crestDB) > 7.5;
   const autoLevel = (peaks.dynamicSpreadDB ?? 0) > 7.5 && !clippedOrPinned;
 

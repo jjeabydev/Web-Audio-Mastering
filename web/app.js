@@ -221,6 +221,7 @@ const analysisFocusValue = document.getElementById('analysisFocusValue');
 const analysisRiskValue = document.getElementById('analysisRiskValue');
 const analysisSafeValue = document.getElementById('analysisSafeValue');
 const analysisHeadroomValue = document.getElementById('analysisHeadroomValue');
+const analysisToneValue = document.getElementById('analysisToneValue');
 const modeProfileValue = document.getElementById('modeProfileValue');
 const modeTargetValue = document.getElementById('modeTargetValue');
 const modeInputValue = document.getElementById('modeInputValue');
@@ -2013,6 +2014,16 @@ function getFocusLabel(analysis = fileState.aiAnalysis) {
   return 'Full Track';
 }
 
+function getToneLabel(analysis = fileState.aiAnalysis) {
+  if (!analysis?.profile) return '--';
+  const { mudDB, harshDB, metallicDB = -18, airDB, presenceToBodyDB = 0 } = analysis.profile;
+  if (harshDB > -11 || metallicDB > -13) return 'Harsh';
+  if (mudDB > -7.5 && presenceToBodyDB < 0.5) return 'Muddy';
+  if (airDB < -23 && harshDB < -13 && metallicDB < -15) return 'Dull';
+  if (presenceToBodyDB < -2.5 && airDB < -20) return 'Veiled';
+  return 'Open';
+}
+
 function formatProfileName(value) {
   if (!value) return 'Auto';
   return value
@@ -2064,6 +2075,7 @@ function updateControlPanelSummary() {
   if (analysisFocusValue) analysisFocusValue.textContent = getFocusLabel();
   if (analysisRiskValue) analysisRiskValue.textContent = getSourceRiskLabel();
   if (analysisHeadroomValue) analysisHeadroomValue.textContent = getHeadroomLabel();
+  if (analysisToneValue) analysisToneValue.textContent = getToneLabel();
   if (analysisSafeValue) {
     const safeOn = truePeakLimit.checked && cleanLowEnd.checked && centerBass.checked;
     const lossySafe = !currentFile || !/\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentFile.name) || ceilingValueDb <= -1.4;
