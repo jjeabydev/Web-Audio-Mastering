@@ -224,6 +224,9 @@ const modeTargetValue = document.getElementById('modeTargetValue');
 const modeInputValue = document.getElementById('modeInputValue');
 const modeCeilingValue = document.getElementById('modeCeilingValue');
 const modeLimiterValue = document.getElementById('modeLimiterValue');
+const modeEqValue = document.getElementById('modeEqValue');
+const autoGainBtn = document.getElementById('autoGainBtn');
+const levelMatchPanel = document.getElementById('levelMatchPanel');
 
 // Transport display elements
 const currentTimeEl = document.getElementById('currentTime');
@@ -1940,6 +1943,33 @@ function getFocusLabel(analysis = fileState.aiAnalysis) {
   return 'Full Track';
 }
 
+function isEqFlat() {
+  return Math.max(
+    Math.abs(eqValues.low),
+    Math.abs(eqValues.lowMid),
+    Math.abs(eqValues.mid),
+    Math.abs(eqValues.highMid),
+    Math.abs(eqValues.high)
+  ) < 0.05;
+}
+
+function resetEQToFlat() {
+  eqValues.low = 0;
+  eqValues.lowMid = 0;
+  eqValues.mid = 0;
+  eqValues.highMid = 0;
+  eqValues.high = 0;
+  if (faders.eqLow) faders.eqLow.setValue(0);
+  if (faders.eqLowMid) faders.eqLowMid.setValue(0);
+  if (faders.eqMid) faders.eqMid.setValue(0);
+  if (faders.eqHighMid) faders.eqHighMid.setValue(0);
+  if (faders.eqHigh) faders.eqHigh.setValue(0);
+  document.querySelectorAll('.preset-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.preset === 'flat');
+  });
+  updateEQ();
+}
+
 function updateControlPanelSummary() {
   if (analysisFocusValue) analysisFocusValue.textContent = getFocusLabel();
   if (analysisRiskValue) analysisRiskValue.textContent = getSourceRiskLabel();
@@ -1954,6 +1984,11 @@ function updateControlPanelSummary() {
   if (modeLimiterValue) {
     const label = limiterCharacter.selectedOptions?.[0]?.textContent || limiterCharacter.value;
     modeLimiterValue.textContent = label;
+  }
+  if (modeEqValue) modeEqValue.textContent = isEqFlat() ? 'EQ Flat' : 'EQ Custom';
+  if (levelMatchPanel) {
+    const transportLevelMatch = document.getElementById('levelMatchBtn');
+    levelMatchPanel.checked = transportLevelMatch?.checked ?? true;
   }
 }
 
@@ -2212,6 +2247,9 @@ function applyModeDefaults(defaults, options = {}) {
   tapeWarmth.checked = merged.tapeWarmth;
   addAir.checked = merged.addAir;
   stereoWidthSlider.value = String(merged.stereoWidth);
+  if (options.resetEQ !== false) {
+    resetEQToFlat();
+  }
   updateSliderLabels();
 }
 
@@ -2248,10 +2286,44 @@ function applyAIAutoRecommendation(analysis, source = {}, options = {}) {
     faders.ceiling.setValue(recommendation.truePeakCeiling, true);
   }
 
+  resetEQToFlat();
   updateSliderLabels();
   updateChecklist();
   console.log('[AI Auto] Applied analysis recommendation:', recommendation);
   return recommendation;
+}
+
+function getCurrentSourceDescriptor() {
+  const currentName = currentFile?.name || fileState.selectedFilePath || '';
+  return {
+    bitrateKbps: fileState.estimatedBitrateKbps,
+    isLossy: /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentName)
+  };
+}
+
+function applySourceSafeGain() {
+  if (!fileState.aiAnalysis) {
+    showToast('Upload a song first so Auto Gain can analyze it.', 'error');
+    return;
+  }
+
+  const recommendation = getAIMasteringRecommendation(fileState.aiAnalysis, getCurrentSourceDescriptor());
+  setTargetLufsControl(recommendation.targetLufs);
+  limiterCharacter.value = recommendation.limiterCharacter;
+  truePeakLimit.checked = true;
+  cleanLowEnd.checked = recommendation.cleanLowEnd;
+  centerBass.checked = recommendation.centerBass;
+  if (faders.inputGain) {
+    faders.inputGain.setValue(recommendation.inputGain, true);
+  }
+  if (faders.ceiling) {
+    faders.ceiling.setValue(recommendation.truePeakCeiling, true);
+  }
+  updateSliderLabels();
+  markCustomPreset();
+  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  updateChecklist();
+  showToast('Auto Gain applied from source analysis.', 'success', 1800);
 }
 
 function applyAssistantPreset(name) {
@@ -2265,14 +2337,18 @@ function applyAssistantPreset(name) {
     return;
   }
 
+  if (name === 'reference' && referenceName.textContent === 'No reference') {
+    referenceMatch.checked = false;
+    selectReferenceBtn.click();
+    updateChecklist();
+    return;
+  }
+
   if (name === 'ai-auto' && fileState.aiAnalysis) {
     setAssistantPresetActive('ai-auto');
     applyAIAutoRecommendation(
       fileState.aiAnalysis,
-      {
-        bitrateKbps: fileState.estimatedBitrateKbps,
-        isLossy: currentFile ? /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentFile.name) : true
-      },
+      getCurrentSourceDescriptor(),
       {
         force: true,
         recommendation: fileState.aiAutoRecommendation
@@ -2293,11 +2369,7 @@ function applyAssistantPreset(name) {
     referenceMatch.checked = false;
   } else if (name === 'reference') {
     applyModeDefaults(AI_MODE_DEFAULTS.reference, { referenceTarget: true });
-    if (referenceName.textContent === 'No reference') {
-      selectReferenceBtn.click();
-    } else {
-      referenceMatch.checked = true;
-    }
+    referenceMatch.checked = true;
   } else {
     applyModeDefaults(AI_MODE_DEFAULTS.auto);
     referenceMatch.checked = false;
@@ -2387,6 +2459,10 @@ aiProfile.addEventListener('change', () => {
   applyAIProfileSelectionDefaults();
 });
 
+autoGainBtn?.addEventListener('click', () => {
+  applySourceSafeGain();
+});
+
 aiIntensity.addEventListener('input', () => {
   aiIntensityValue.textContent = `${aiIntensity.value}%`;
   markCustomPreset();
@@ -2454,9 +2530,25 @@ referenceAmount.addEventListener('change', () => {
 // truePeakSlider event listener removed - now using ceiling fader
 
 const levelMatchBtn = document.getElementById('levelMatchBtn');
+function syncLevelMatchControls(sourceChecked) {
+  levelMatchBtn.checked = sourceChecked;
+  if (levelMatchPanel) levelMatchPanel.checked = sourceChecked;
+  updateChecklist();
+}
+
 levelMatchBtn.addEventListener('change', () => {
+  syncLevelMatchControls(levelMatchBtn.checked);
   if (playerState.isBypassed && playerState.isPlaying) {
     // Restart playback to switch buffers
+    const currentTime = audioNodes.context.currentTime - playerState.startTime;
+    playerState.pauseTime = currentTime;
+    playAudio();
+  }
+});
+
+levelMatchPanel?.addEventListener('change', () => {
+  syncLevelMatchControls(levelMatchPanel.checked);
+  if (playerState.isBypassed && playerState.isPlaying) {
     const currentTime = audioNodes.context.currentTime - playerState.startTime;
     playerState.pauseTime = currentTime;
     playAudio();
@@ -2704,7 +2796,9 @@ initFaders({
     updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
   },
   onEQChange: (eqVals) => {
+    markCustomPreset();
     updateEQ();
+    updateControlPanelSummary();
     // Keep live chain responsive while dragging; defer cache rebuild to commit.
     updateAudioChain({ scheduleCache: false });
   },
@@ -2715,7 +2809,9 @@ initFaders({
 
 // Setup EQ presets with callback
 setupEQPresets(eqPresets, () => {
+  markCustomPreset();
   updateEQ();
+  updateControlPanelSummary();
   updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
 });
 

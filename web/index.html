@@ -218,6 +218,10 @@
               <span>Safe</span>
               <strong id="analysisSafeValue">On</strong>
             </div>
+            <div class="analysis-item">
+              <span>Headroom</span>
+              <strong id="analysisHeadroomValue">--</strong>
+            </div>
           </div>
           <label class="toggle-row"
             data-tip="Automatic AI/MP3 mastering repair: adapts harshness, mud, low-end cleanup, clipper drive, and final loudness behavior.">
@@ -396,7 +400,18 @@
             <span id="modeInputValue">Input -3.5</span>
             <span id="modeCeilingValue">TP -1.0</span>
             <span id="modeLimiterValue">Balanced</span>
+            <span id="modeEqValue">EQ Flat</span>
           </div>
+          <button id="autoGainBtn" class="panel-action-btn" type="button"
+            data-tip="Re-apply source-safe input gain, true-peak ceiling, and loudness target from the current upload analysis without changing your chosen mode.">
+            Auto Gain
+          </button>
+          <label class="toggle-row compact-toggle"
+            data-tip="Keep enabled when comparing FX on/off. The original preview is level-matched so louder does not automatically sound better.">
+            <span>Volume Match</span>
+            <input type="checkbox" id="levelMatchPanel" checked>
+            <span class="toggle"></span>
+          </label>
           <div class="loudness-faders">
             <div id="inputGainFader" class="fader-container"
               data-tip="If the source is already loud or clipped, lower Input to -5 or -6dB. If it is very quiet, raise it gently, but avoid red clipping."></div>

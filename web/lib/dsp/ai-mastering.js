@@ -597,9 +597,12 @@ export function chooseAIMasteringProfile(analysis, requestedProfile = 'auto') {
   const { mudDB, harshDB, metallicDB = -18, airDB, subToBassDB, presenceToBodyDB } = analysis.profile;
   const { peakDensity = 0, clipDensity = 0, loudestCrestDB = analysis.crestDB, dynamicSpreadDB = 0 } = analysis.peaks || {};
   const stereoRisk = analysis.stereo
-    ? clamp((analysis.stereo.sideToMidDB + 5) / 8, 0, 1) +
-      clamp((analysis.stereo.lowSideToMidDB + 10) / 10, 0, 1) +
+    ? Math.max(
+      clamp((analysis.stereo.sideToMidDB + 5) / 8, 0, 1),
+      clamp((analysis.stereo.lowSideToMidDB + 10) / 10, 0, 1),
+      clamp((analysis.stereo.highSideToMidDB + 8) / 12, 0, 1),
       clamp((0.12 - analysis.stereo.correlation) / 0.5, 0, 1)
+    )
     : 0;
 
   if (
