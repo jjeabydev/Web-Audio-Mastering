@@ -221,6 +221,7 @@ const analysisFocusValue = document.getElementById('analysisFocusValue');
 const analysisRiskValue = document.getElementById('analysisRiskValue');
 const analysisSafeValue = document.getElementById('analysisSafeValue');
 const analysisHeadroomValue = document.getElementById('analysisHeadroomValue');
+const modeProfileValue = document.getElementById('modeProfileValue');
 const modeTargetValue = document.getElementById('modeTargetValue');
 const modeInputValue = document.getElementById('modeInputValue');
 const modeCeilingValue = document.getElementById('modeCeilingValue');
@@ -1961,6 +1962,26 @@ function getFocusLabel(analysis = fileState.aiAnalysis) {
   return 'Full Track';
 }
 
+function formatProfileName(value) {
+  if (!value) return 'Auto';
+  return value
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function getModeProfileLabel() {
+  const activePreset = getActiveAssistantPresetName();
+  if (activePreset === 'ai-auto' && fileState.aiAutoRecommendation?.profile) {
+    return `AI ${formatProfileName(fileState.aiAutoRecommendation.profile)}`;
+  }
+  if (activePreset === 'ai-clean') return 'AI Clean';
+  if (activePreset === 'ai-loud') return 'AI Loud';
+  if (activePreset === 'reference') return 'Reference';
+  if (activePreset === 'manual') return 'Manual';
+  if (activePreset === 'custom') return 'Custom';
+  return formatProfileName(aiProfile.value || 'auto');
+}
+
 function isEqFlat() {
   return Math.max(
     Math.abs(eqValues.low),
@@ -2001,6 +2022,7 @@ function updateControlPanelSummary() {
     analysisSafeValue.textContent = safeOn && lossySafe && sourceProtected ? 'On' : 'Check';
   }
   if (modeTargetValue) modeTargetValue.textContent = `Target ${targetLufsSlider.value}`;
+  if (modeProfileValue) modeProfileValue.textContent = `Profile ${getModeProfileLabel()}`;
   if (modeInputValue) modeInputValue.textContent = `Input ${inputGainValue.toFixed(1)}`;
   if (modeCeilingValue) modeCeilingValue.textContent = `TP ${ceilingValueDb.toFixed(1)}`;
   if (modeLimiterValue) {
