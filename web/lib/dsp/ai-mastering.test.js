@@ -423,6 +423,28 @@ describe('AI-generated mastering repair', () => {
     expect(after.bands.metallic).toBeLessThan(before.bands.metallic);
   });
 
+  it('keeps limiter stress guard from over-darkening veiled sources', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [120, 0.08],
+        [450, 0.07],
+        [900, 0.08],
+        [3600, 0.01],
+        [12500, 0.004]
+      ]
+    });
+
+    const guarded = applyLimiterStressGuard(buffer, {
+      targetLufs: -10,
+      intensity: 1.2,
+      amount: 1
+    });
+
+    expect(Math.abs(guarded.moves.presenceCut)).toBeLessThan(0.25);
+    expect(Math.abs(guarded.moves.airShelf)).toBeLessThan(0.2);
+    expect(guarded.moves.metallicCut).toBeLessThanOrEqual(0);
+  });
+
   it('stabilizes excessive phasey stereo side energy', () => {
     const buffer = makeWidePhaseBuffer({});
     const before = analyzeAIGeneratedMastering(buffer);

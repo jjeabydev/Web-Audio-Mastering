@@ -804,13 +804,16 @@ export function applyLimiterStressGuard(buffer, options = {}) {
     0.55
   );
   const loudnessPressure = clamp((-12 - targetLufs) * 0.16 + (options.intensity ?? 1) * 0.18 + peakPressure, 0.08, 0.75);
+  const fragileHighs = (analysis.codecStress ?? 0) > 0.45 || harshDB > -11.5 || metallicDB > -13.5;
+  const veiledSource = airDB < -23 && presenceToBodyDB < -8 && !fragileHighs;
+  const opennessGuard = veiledSource ? 0.35 : 1;
 
   const lowStress = clamp((subToBassDB + 2.5) * 0.18 + loudnessPressure, 0, 1.2) * amount;
   const mudStress = clamp((mudDB + 9.5) * 0.22 + loudnessPressure * 0.55, 0, 1.4) * amount;
-  const presenceStress = clamp((presenceToBodyDB + 1.0) * 0.28 + loudnessPressure * 0.72, 0, 1.75) * amount;
+  const presenceStress = clamp((presenceToBodyDB + 1.0) * 0.28 + loudnessPressure * 0.72 * opennessGuard, 0, 1.75) * amount;
   const harshStress = clamp((harshDB + 13.5) * 0.26 + loudnessPressure * 0.82, 0, 1.95) * amount;
   const metallicStress = clamp((metallicDB + 17.5) * 0.18 + loudnessPressure * 0.92, 0, 1.85) * amount;
-  const airStress = clamp((airDB + 14.5) * 0.14 + loudnessPressure * 0.35, 0, 1.0) * amount;
+  const airStress = clamp((airDB + 14.5) * 0.14 + loudnessPressure * 0.35 * opennessGuard, 0, 1.0) * amount;
 
   const moves = {
     lowShelf: -clamp(lowStress, 0, 1.2),

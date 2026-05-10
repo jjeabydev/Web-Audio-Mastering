@@ -2255,6 +2255,7 @@ function refineModeDefaultsForCurrentSource(defaults) {
   const analysis = fileState.aiAnalysis;
   const currentName = currentFile?.name || '';
   const isLossy = /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentName);
+  const isLowBitrate = isLossy && Number.isFinite(fileState.estimatedBitrateKbps) && fileState.estimatedBitrateKbps < 192;
 
   if (isLossy) {
     refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
@@ -2270,6 +2271,13 @@ function refineModeDefaultsForCurrentSource(defaults) {
   const limiterRisk = analysis.limiterRisk ?? 0;
   const codecStress = analysis.codecStress ?? 0;
   const stereoRisk = getStereoRisk(analysis);
+  const profile = analysis.profile || {};
+  const darkButSafe = (profile.airDB ?? -18) < -24 &&
+    (profile.presenceToBodyDB ?? 0) < -10 &&
+    (profile.harshDB ?? -18) < -12 &&
+    (profile.metallicDB ?? -18) < -14 &&
+    limiterRisk < 0.35 &&
+    codecStress < 0.28;
 
   if (clippedOrPinned || limiterRisk > 0.55 || (peaks.loudestCrestDB ?? 12) < 6.5) {
     refined.inputGain = Math.min(refined.inputGain ?? -3.5, -5.5);
@@ -2289,6 +2297,13 @@ function refineModeDefaultsForCurrentSource(defaults) {
     refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 85);
     refined.limiterCharacter = 'transparent';
     refined.addAir = false;
+  }
+
+  if (darkButSafe && !isLowBitrate) {
+    refined.aiProfile = refined.aiProfile === 'auto' ? 'clarity' : refined.aiProfile;
+    refined.addAir = true;
+    refined.artifactProtection = Math.min(refined.artifactProtection ?? 75, 75);
+    refined.sibilanceProtection = Math.min(refined.sibilanceProtection ?? 70, 75);
   }
 
   if (stereoRisk > 0.75) {
