@@ -203,7 +203,7 @@
         <div class="settings-card">
           <h3>Quick Fix <span class="live-badge">Live</span></h3>
           <div class="control-help">
-            Start with AI Auto. If high notes sound robotic, raise Metallic. If vocal S sounds are sharp, raise Sibilance.
+            Start with AI Auto. If Headroom says Hot or Clipped, use Auto Gain before pushing loudness.
           </div>
           <div class="analysis-strip" id="analysisStrip" data-tip="Shows what the upload analysis and current mode are doing to protect quality.">
             <div class="analysis-item">
@@ -218,7 +218,7 @@
               <span>Safe</span>
               <strong id="analysisSafeValue">On</strong>
             </div>
-            <div class="analysis-item">
+            <div class="analysis-item" data-tip="Good means about 4-8 dB of input headroom before mastering. Hot or Clipped means use Auto Gain first.">
               <span>Headroom</span>
               <strong id="analysisHeadroomValue">--</strong>
             </div>

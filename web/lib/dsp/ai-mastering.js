@@ -515,12 +515,15 @@ export function analyzeAIGeneratedMastering(buffer) {
   const loudestRanges = getLoudestRanges(mono, buffer.sampleRate, activeRanges);
   const activeRms = rangedRms(mono, activeRanges);
   const loudestRms = rangedRms(mono, loudestRanges);
-  const peak = Math.max(...Array.from({ length: buffer.numberOfChannels }, (_, ch) => {
+  const samplePeak = Math.max(...Array.from({ length: buffer.numberOfChannels }, (_, ch) => {
     const data = buffer.getChannelData(ch);
     let channelPeak = 0;
     for (let i = 0; i < data.length; i++) channelPeak = Math.max(channelPeak, Math.abs(data[i]));
     return channelPeak;
   }));
+  const truePeakDB = findTruePeak(buffer);
+  const truePeak = Number.isFinite(truePeakDB) ? dbToLinear(truePeakDB) : samplePeak;
+  const peak = Math.max(samplePeak, truePeak);
   const crestDB = fullRms > 0 ? linearToDb(peak / fullRms) : 0;
 
   const bands = {

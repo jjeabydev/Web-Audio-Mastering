@@ -220,6 +220,7 @@ const assistantPresetButtons = document.querySelectorAll('.assistant-preset');
 const analysisFocusValue = document.getElementById('analysisFocusValue');
 const analysisRiskValue = document.getElementById('analysisRiskValue');
 const analysisSafeValue = document.getElementById('analysisSafeValue');
+const analysisHeadroomValue = document.getElementById('analysisHeadroomValue');
 const modeTargetValue = document.getElementById('modeTargetValue');
 const modeInputValue = document.getElementById('modeInputValue');
 const modeCeilingValue = document.getElementById('modeCeilingValue');
@@ -1934,6 +1935,23 @@ function getSourceRiskLabel(analysis = fileState.aiAnalysis) {
   return 'Low';
 }
 
+function getSourceHeadroomDB(analysis = fileState.aiAnalysis) {
+  if (Number.isFinite(fileState.originalTruePeak)) {
+    return -fileState.originalTruePeak;
+  }
+  const measuredHeadroom = analysis?.peaks?.truePeakHeadroomDB;
+  return Number.isFinite(measuredHeadroom) ? measuredHeadroom : NaN;
+}
+
+function getHeadroomLabel(analysis = fileState.aiAnalysis) {
+  const headroom = getSourceHeadroomDB(analysis);
+  if (!Number.isFinite(headroom)) return '--';
+  if (headroom <= 0.3) return 'Clipped';
+  if (headroom < 4) return `Hot ${headroom.toFixed(1)}`;
+  if (headroom <= 8) return `Good ${headroom.toFixed(1)}`;
+  return `Quiet ${headroom.toFixed(1)}`;
+}
+
 function getFocusLabel(analysis = fileState.aiAnalysis) {
   if (!analysis) return 'Waiting';
   const activePct = Math.round((analysis.activeRatio ?? 0) * 100);
@@ -1973,10 +1991,14 @@ function resetEQToFlat() {
 function updateControlPanelSummary() {
   if (analysisFocusValue) analysisFocusValue.textContent = getFocusLabel();
   if (analysisRiskValue) analysisRiskValue.textContent = getSourceRiskLabel();
+  if (analysisHeadroomValue) analysisHeadroomValue.textContent = getHeadroomLabel();
   if (analysisSafeValue) {
     const safeOn = truePeakLimit.checked && cleanLowEnd.checked && centerBass.checked;
     const lossySafe = !currentFile || !/\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentFile.name) || ceilingValueDb <= -1.4;
-    analysisSafeValue.textContent = safeOn && lossySafe ? 'On' : 'Check';
+    const sourceHeadroom = getSourceHeadroomDB();
+    const compensatedHeadroom = sourceHeadroom - Math.min(0, inputGainValue);
+    const sourceProtected = !Number.isFinite(sourceHeadroom) || compensatedHeadroom >= 4 || inputGainValue <= -5.5;
+    analysisSafeValue.textContent = safeOn && lossySafe && sourceProtected ? 'On' : 'Check';
   }
   if (modeTargetValue) modeTargetValue.textContent = `Target ${targetLufsSlider.value}`;
   if (modeInputValue) modeInputValue.textContent = `Input ${inputGainValue.toFixed(1)}`;

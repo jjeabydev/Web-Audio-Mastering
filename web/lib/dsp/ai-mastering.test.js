@@ -182,6 +182,19 @@ describe('AI-generated mastering repair', () => {
     expect(profile.name).toBe('clean');
   });
 
+  it('uses oversampled true peak for source headroom analysis', () => {
+    const buffer = new TestAudioBuffer({ numberOfChannels: 1, length: 8, sampleRate: 48000 });
+    buffer.getChannelData(0).set([0, 0.72, 0.97, 0.72, 0, 0, 0, 0]);
+
+    const samplePeakDB = 20 * Math.log10(0.97);
+    const truePeakDB = findTruePeak(buffer);
+    const analysis = analyzeAIGeneratedMastering(buffer);
+
+    expect(truePeakDB).toBeGreaterThan(samplePeakDB);
+    expect(analysis.peak).toBeGreaterThan(0.97);
+    expect(analysis.peaks.truePeakHeadroomDB).toBeCloseTo(-truePeakDB, 1);
+  });
+
   it('applies profile tone and intensity to mastering moves', () => {
     const buffer = makeToneBuffer({
       frequencies: [
