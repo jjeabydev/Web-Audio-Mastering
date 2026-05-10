@@ -1616,25 +1616,76 @@ async function loadFile(file) {
   }
 }
 
+function isSupportedAudioFile(file) {
+  if (!file) return false;
+  if (file.type?.startsWith('audio/')) return true;
+  return /\.(mp3|wav|flac|aac|m4a|mp4|ogg|wma|amr)$/i.test(file.name || '');
+}
+
+async function loadDroppedFile(file) {
+  if (!isSupportedAudioFile(file)) {
+    showToast('Please drop a supported audio file.', 'error');
+    return false;
+  }
+
+  stopAudio();
+  playerState.pauseTime = 0;
+  return loadFile(file);
+}
+
 // Drag and drop
-dropZone.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  dropZone.classList.add('drag-over');
+function hasDraggedFiles(e) {
+  return Array.from(e.dataTransfer?.types || []).includes('Files');
+}
+
+function setDropActive(active) {
+  dropZone.classList.toggle('drag-over', active);
+}
+
+['dragenter', 'dragover'].forEach(type => {
+  window.addEventListener(type, (e) => {
+    if (!hasDraggedFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    setDropActive(true);
+  });
 });
 
-dropZone.addEventListener('dragleave', () => {
-  dropZone.classList.remove('drag-over');
+['dragleave', 'dragend'].forEach(type => {
+  window.addEventListener(type, (e) => {
+    if (type === 'dragleave' && e.relatedTarget) return;
+    setDropActive(false);
+  });
+});
+
+window.addEventListener('drop', async (e) => {
+  if (!hasDraggedFiles(e)) return;
+  e.preventDefault();
+  setDropActive(false);
+
+  const file = e.dataTransfer?.files?.[0];
+  if (file) {
+    await loadDroppedFile(file);
+  }
+});
+
+dropZone.addEventListener('dragover', (e) => {
+  if (!hasDraggedFiles(e)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  e.dataTransfer.dropEffect = 'copy';
+  setDropActive(true);
 });
 
 dropZone.addEventListener('drop', async (e) => {
+  if (!hasDraggedFiles(e)) return;
   e.preventDefault();
-  dropZone.classList.remove('drag-over');
+  e.stopPropagation();
+  setDropActive(false);
 
-  const file = e.dataTransfer.files[0];
-  if (file && /\.(mp3|wav|flac|aac|m4a|mp4)$/i.test(file.name)) {
-    stopAudio();
-    playerState.pauseTime = 0;
-    await loadFile(file); // Pass File object directly in browser
+  const file = e.dataTransfer?.files?.[0];
+  if (file) {
+    await loadDroppedFile(file);
   }
 });
 
