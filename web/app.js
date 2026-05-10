@@ -2371,10 +2371,7 @@ function applyAssistantPreset(name) {
     applyAIAutoRecommendation(
       fileState.aiAnalysis,
       getCurrentSourceDescriptor(),
-      {
-        force: true,
-        recommendation: fileState.aiAutoRecommendation
-      }
+      { force: true }
     );
     referenceMatch.checked = false;
     schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
