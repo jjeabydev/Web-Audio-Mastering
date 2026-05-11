@@ -5,6 +5,7 @@ import { initDSPWorker, getDSPWorker } from './workers/worker-interface.js';
 import {
   measureLUFS,
   findTruePeak,
+  applyLookaheadLimiter,
   normalizeToLUFS,
   analyzeAIGeneratedMastering,
   chooseAIMasteringProfile,
@@ -197,6 +198,8 @@ const targetLufsValue = document.getElementById('targetLufsValue');
 const stereoWidthSlider = document.getElementById('stereoWidth');
 const stereoWidthValue = document.getElementById('stereoWidthValue');
 const outputLufsDisplay = document.getElementById('outputLufs');
+const exportFormatValue = document.getElementById('exportFormatValue');
+const exportQualityValue = document.getElementById('exportQualityValue');
 const truePeakLimit = document.getElementById('truePeakLimit');
 const cleanLowEnd = document.getElementById('cleanLowEnd');
 const glueCompression = document.getElementById('glueCompression');
@@ -1196,14 +1199,32 @@ async function loadAudioFile(file) {
 
     fileState.originalBuffer = decodedBuffer;
 
-    // Clear cached render buffer (will be rebuilt when settings change)
+    if (cacheRenderTimeout) {
+      clearTimeout(cacheRenderTimeout);
+      cacheRenderTimeout = null;
+    }
+    if (liveWaveformTimeout) {
+      clearTimeout(liveWaveformTimeout);
+      liveWaveformTimeout = null;
+    }
+    cacheRenderQueued = false;
+    cacheRenderQueuedImmediate = false;
+
+    // Reset all derived buffers so a new upload cannot reuse stale mastering state.
+    fileState.normalizedBuffer = null;
+    fileState.normalizedTargetLufs = null;
+    fileState.processedBuffer = null;
     fileState.cachedRenderBuffer = null;
     fileState.cachedRenderLufs = null;
+    fileState.forceLivePreview = false;
+    fileState.isRenderingCache = false;
+    fileState.isProcessingEffects = false;
     fileState.aiAnalysis = null;
     fileState.estimatedBitrateKbps = null;
     fileState.aiAutoRecommendation = null;
     fileState.waveformMode = 'original';
     fileState.cacheRenderVersion++;
+    clearExportQualitySummary();
 
     // Show measuring phase with intermediate progress updates
     showLoadingModal('Measuring loudness...', 35);
@@ -1221,6 +1242,7 @@ async function loadAudioFile(file) {
     fileState.originalSampleRate = decodedBuffer.sampleRate;
     fileState.estimatedBitrateKbps = Math.round((file.size * 8) / (decodedBuffer.duration * 1000));
     fileState.aiAnalysis = analyzeAIGeneratedMastering(decodedBuffer);
+    updateExportFormatSummary();
     setAssistantPresetActive('ai-auto');
     clearReferenceState();
     applyAIAutoRecommendation(fileState.aiAnalysis, {
@@ -1789,12 +1811,12 @@ processBtn.addEventListener('click', async () => {
 async function processAudio() {
 
   // Parse and validate settings
-  const parsedSampleRate = parseInt(sampleRate.value) || 44100;
+  const parsedSampleRate = resolveExportSampleRate();
   const parsedBitDepth = parseInt(bitDepth.value) || 16;
   const parsedStereoWidth = parseInt(stereoWidthSlider.value) || 100;
 
   // Validate settings
-  if (![44100, 48000].includes(parsedSampleRate)) {
+  if (![44100, 48000, 88200, 96000, 176400, 192000].includes(parsedSampleRate)) {
     showToast('Invalid sample rate', 'error');
     processBtn.disabled = false;
     isProcessing = false;
@@ -1835,6 +1857,7 @@ async function processAudio() {
     }
 
     let outputData;
+    let exportStats = null;
 
     // Hybrid Pipeline: Cached buffer is preview-only (missing EQ/Comp).
     // ALWAYS render full chain for export to ensure parity.
@@ -1867,6 +1890,10 @@ async function processAudio() {
           throw new Error('Cancelled');
         }
 
+        exportBuffer = ensureExportBufferSafety(exportBuffer, settings);
+        exportStats = getExportQualityStats(exportBuffer, settings);
+        updateExportQualitySummary(exportStats);
+
         const encodeProgressStart = needsResample ? 86 : 85;
         const encodeProgressSpan = needsResample ? 9 : 10;
         updateProgress(encodeProgressStart, 'Encoding WAV...');
@@ -1884,13 +1911,21 @@ async function processAudio() {
         }
         console.warn('[Export] Worker render failed, falling back to main thread render:', workerErr);
         outputData = await renderOffline(fileState.originalBuffer, settings, updateProgress, {
-          shouldCancel: () => processingCancelled
+          shouldCancel: () => processingCancelled,
+          onRenderedBuffer: (buffer) => {
+            exportStats = getExportQualityStats(buffer, settings);
+            updateExportQualitySummary(exportStats);
+          }
         });
       }
     } else {
       // Fallback (Main Thread)
       outputData = await renderOffline(fileState.originalBuffer, settings, updateProgress, {
-        shouldCancel: () => processingCancelled
+        shouldCancel: () => processingCancelled,
+        onRenderedBuffer: (buffer) => {
+          exportStats = getExportQualityStats(buffer, settings);
+          updateExportQualitySummary(exportStats);
+        }
       });
     }
 
@@ -1924,7 +1959,7 @@ async function processAudio() {
     showLoadingModal('Complete!', 100, false);
     setTimeout(() => {
       hideLoadingModal();
-      showToast('✓ Export complete! Your mastered file is downloading.', 'success');
+      showToast(formatExportCompleteMessage(exportStats), 'success', exportStats ? 5200 : 3500);
     }, 300);
 
   } catch (error) {
@@ -1939,6 +1974,99 @@ async function processAudio() {
 
   isProcessing = false;
   processBtn.disabled = false;
+}
+
+function resolveExportSampleRate() {
+  if (sampleRate.value === 'source' && Number.isFinite(fileState.originalSampleRate)) {
+    return Math.max(44100, Math.round(fileState.originalSampleRate));
+  }
+  return parseInt(sampleRate.value) || 44100;
+}
+
+function formatSampleRateLabel(rate) {
+  if (!Number.isFinite(rate)) return '44.1k';
+  const khz = rate / 1000;
+  return Number.isInteger(khz) ? `${khz}k` : `${khz.toFixed(1)}k`;
+}
+
+function updateExportFormatSummary() {
+  if (!exportFormatValue) return;
+
+  const selectedRate = sampleRate.value === 'source'
+    ? `Source/${formatSampleRateLabel(resolveExportSampleRate())}`
+    : formatSampleRateLabel(parseInt(sampleRate.value) || 44100);
+  const selectedDepth = parseInt(bitDepth.value) || 16;
+  exportFormatValue.textContent = `${selectedRate} / ${selectedDepth}-bit`;
+}
+
+function getExportQualityStats(buffer, settings) {
+  if (!buffer) return null;
+  return {
+    lufs: measureLUFS(buffer),
+    truePeak: findTruePeak(buffer),
+    sampleRate: buffer.sampleRate,
+    bitDepth: settings.bitDepth || 16,
+    ceiling: Number.isFinite(Number(settings.truePeakCeiling)) ? Number(settings.truePeakCeiling) : -1
+  };
+}
+
+function updateExportQualitySummary(stats) {
+  if (!stats) {
+    clearExportQualitySummary();
+    return;
+  }
+
+  const safeTruePeak = Number.isFinite(stats.truePeak) && stats.truePeak <= stats.ceiling + 0.02;
+  if (exportQualityValue) {
+    exportQualityValue.textContent = `${stats.lufs.toFixed(1)} LUFS / ${stats.truePeak.toFixed(2)} dBTP`;
+    exportQualityValue.classList.toggle('warning', !safeTruePeak);
+  }
+  if (outputLufsDisplay) {
+    outputLufsDisplay.textContent = `${stats.lufs.toFixed(1)} LUFS`;
+  }
+}
+
+function clearExportQualitySummary() {
+  if (exportQualityValue) {
+    exportQualityValue.textContent = 'Export --';
+    exportQualityValue.classList.remove('warning');
+  }
+}
+
+function formatExportCompleteMessage(stats) {
+  if (!stats) return '✓ Export complete! Your mastered file is downloading.';
+  return `✓ Export complete: ${stats.lufs.toFixed(1)} LUFS, ${stats.truePeak.toFixed(2)} dBTP, ${formatSampleRateLabel(stats.sampleRate)} / ${stats.bitDepth}-bit WAV.`;
+}
+
+function ensureExportBufferSafety(buffer, settings) {
+  if (!buffer || !settings.truePeakLimit) return buffer;
+
+  const ceiling = Number.isFinite(Number(settings.truePeakCeiling))
+    ? Number(settings.truePeakCeiling)
+    : -1;
+  const truePeak = findTruePeak(buffer);
+
+  if (Number.isFinite(truePeak) && truePeak > ceiling + 0.02) {
+    console.warn('[Export] Post-render true peak exceeded ceiling, applying final safety limiter:', {
+      truePeak,
+      ceiling
+    });
+    return applyLookaheadLimiter(
+      buffer,
+      Math.pow(10, ceiling / 20),
+      3,
+      180,
+      3,
+      true
+    );
+  }
+
+  console.log('[Export] Final safety check:', {
+    lufs: measureLUFS(buffer).toFixed(1),
+    truePeak: Number.isFinite(truePeak) ? truePeak.toFixed(2) : '--',
+    ceiling
+  });
+  return buffer;
 }
 
 cancelBtn.addEventListener('click', cancelProcessing);
@@ -2913,6 +3041,7 @@ targetLufsSlider.addEventListener('input', () => {
   el.addEventListener('change', () => {
     updateDitherControlState();
     updateOutputPresetButtons(outputPresets);
+    updateExportFormatSummary();
   });
 });
 
@@ -3067,9 +3196,11 @@ setupEQPresets(eqPresets, () => {
 setupOutputPresets(outputPresets, () => {
   updateDitherControlState();
   updateOutputPresetButtons(outputPresets);
+  updateExportFormatSummary();
 });
 updateDitherControlState();
 updateOutputPresetButtons(outputPresets);
+updateExportFormatSummary();
 
 setAdvancedMode(false);
 updateSliderLabels();

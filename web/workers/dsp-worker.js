@@ -1511,6 +1511,17 @@ self.onmessage = async (e) => {
           }
         }
 
+        // Match the main-thread offline graph: clean sub-rumble before dynamic and AI repair stages.
+        if (settings.cleanLowEnd) {
+          sendProgress(id, 0.12, 'Cleaning low end...');
+          buffer = applyFinalFilters(buffer, {
+            highpass: true,
+            lowpass: false,
+            highpassFreq: 30,
+            highpassQ: 0.7
+          });
+        }
+
         // 1. Deharsh / Hybrid Dynamic Processor (if enabled)
         let aiProfile = {
           softClipDrive: 1.5,
@@ -1631,7 +1642,7 @@ self.onmessage = async (e) => {
         const finalFilterAnalysis = settings.aiEnhance !== false ? analyzeAIGeneratedMastering(buffer) : null;
         const finalFilterOptions = getAdaptiveFinalFilterOptions(finalFilterAnalysis, settings);
         buffer = applyFinalFilters(buffer, {
-          highpass: !!settings.cleanLowEnd,
+          highpass: false,
           ...finalFilterOptions
         });
 
@@ -1758,6 +1769,24 @@ self.onmessage = async (e) => {
             )
           });
           buffer = calibrated.buffer;
+        }
+
+        if (settings.truePeakLimit) {
+          const ceiling = settings.truePeakCeiling || -1;
+          const finalTruePeak = findTruePeakFromChannels(
+            Array.from({ length: buffer.numberOfChannels }, (_, ch) => buffer.getChannelData(ch))
+          );
+          if (Number.isFinite(finalTruePeak) && finalTruePeak > ceiling + 0.02) {
+            sendProgress(id, 0.99, 'Applying export safety limiter...');
+            buffer = applyLookaheadLimiter(
+              buffer,
+              Math.pow(10, ceiling / 20),
+              3,
+              180,
+              3,
+              true
+            );
+          }
         }
 
         // Measure final LUFS

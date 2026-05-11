@@ -721,6 +721,14 @@ body:not(.advanced-mode) .loudness-card {
   white-space: nowrap;
 }
 
+.export-strip {
+  margin-top: 8px;
+}
+
+.export-strip span.warning {
+  color: #fbbf24;
+}
+
 .panel-action-btn {
   width: 100%;
   border: 1px solid var(--border);

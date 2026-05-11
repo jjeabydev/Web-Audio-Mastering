@@ -364,20 +364,25 @@
         <div class="settings-card">
           <h3>Output</h3>
           <div class="control-help">
-            Use Streaming for uploads/distribution. Use CD only for 44.1kHz/16-bit delivery. For MP3 source files, 48kHz/24-bit is still the safer export container.
+            Use Streaming for uploads/distribution. It keeps the source sample rate and saves a 24-bit WAV. Use CD only for 44.1kHz/16-bit delivery.
           </div>
           <div class="output-presets">
             <button class="output-preset-btn active" data-preset="streaming"
-              data-tip="Recommended default. Exports a 48kHz/24-bit WAV that gives encoders more room than 16-bit delivery.">Streaming</button>
+              data-tip="Recommended default. Exports a 24-bit WAV at the source sample rate, with a 44.1kHz minimum for low-rate MP3 sources.">Streaming</button>
             <button class="output-preset-btn" data-preset="cd"
               data-tip="Use only when a client, distributor, or CD workflow specifically asks for 44.1kHz/16-bit.">CD</button>
           </div>
+          <div class="mode-strip export-strip" data-tip="Shows the selected export format and the last rendered quality check after export.">
+            <span id="exportFormatValue">Source / 24-bit</span>
+            <span id="exportQualityValue">Export --</span>
+          </div>
           <div class="select-row advanced-control"
-            data-tip="Keep 48kHz for modern distribution. Choose 44.1kHz only for CD-style delivery or exact compatibility requirements.">
+            data-tip="Keep Source for best preservation. Low-rate sources are exported at 44.1kHz minimum for wider playback compatibility.">
             <span>Sample Rate</span>
             <select id="sampleRate">
+              <option value="source" selected>Source / min 44.1</option>
               <option value="44100">44.1 kHz</option>
-              <option value="48000" selected>48 kHz</option>
+              <option value="48000">48 kHz</option>
             </select>
           </div>
           <div class="select-row advanced-control" data-tip="Keep 24-bit unless you need CD. 16-bit should use dither.">

@@ -25,7 +25,7 @@ export const eqPresets = {
  * Output format presets
  */
 export const outputPresets = {
-  streaming: { sampleRate: 48000, bitDepth: 24 },  // 48k/24-bit preferred by distributors
+  streaming: { sampleRate: 'source', bitDepth: 24 },  // 24-bit WAV while preserving source sample rate
   cd: { sampleRate: 44100, bitDepth: 16 }
 };
 

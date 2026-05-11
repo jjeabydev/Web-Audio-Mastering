@@ -20,7 +20,8 @@ import {
   applyReferenceMatch,
   applyLimiterStressGuard,
   applyStereoStabilityGuard,
-  finalizeMasteringTarget
+  finalizeMasteringTarget,
+  findTruePeak
 } from '../lib/dsp/index.js';
 import { applyMultibandTransient } from '../lib/dsp/multiband-transient.js';
 import { encodeWAVAsync, createOfflineNodes } from './encoder.js';
@@ -284,6 +285,36 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   return { buffer: renderedBuffer, measuredLufs };
 }
 
+function ensureFinalRenderSafety(buffer, settings, logPrefix = '[DSP]') {
+  if (!buffer || !settings.truePeakLimit) return buffer;
+
+  const ceiling = Number.isFinite(Number(settings.truePeakCeiling))
+    ? Number(settings.truePeakCeiling)
+    : -1;
+  const truePeak = findTruePeak(buffer);
+
+  if (Number.isFinite(truePeak) && truePeak > ceiling + 0.02) {
+    console.warn(`${logPrefix} Post-render true peak exceeded ceiling, applying safety limiter:`, {
+      truePeak,
+      ceiling
+    });
+    return applyLookaheadLimiter(
+      buffer,
+      Math.pow(10, ceiling / 20),
+      3,
+      180,
+      3,
+      true
+    );
+  }
+
+  console.log(`${logPrefix} Final safety check:`, {
+    truePeak: Number.isFinite(truePeak) ? truePeak.toFixed(2) : '--',
+    ceiling
+  });
+  return buffer;
+}
+
 /**
  * Resample an AudioBuffer to a target sample rate.
  * Uses OfflineAudioContext so output sample data and WAV header stay aligned.
@@ -322,7 +353,7 @@ export async function resampleAudioBuffer(sourceBuffer, targetSampleRate) {
  * @returns {Promise<Uint8Array>} WAV file data
  */
 export async function renderOffline(sourceBuffer, settings, onProgress, options = {}) {
-  const { shouldCancel = null } = options || {};
+  const { shouldCancel = null, onRenderedBuffer = null } = options || {};
   const throwIfCancelled = () => {
     if (shouldCancel && shouldCancel()) {
       throw new Error('Cancelled');
@@ -372,7 +403,10 @@ export async function renderOffline(sourceBuffer, settings, onProgress, options 
   const dspResult = applyDSPChain(renderedBuffer, settings, (p) => {
     if (onProgress) onProgress(15 + p * 60);
   }, '[Offline Render]');
-  renderedBuffer = dspResult.buffer;
+  renderedBuffer = ensureFinalRenderSafety(dspResult.buffer, settings, '[Offline Render]');
+  if (typeof onRenderedBuffer === 'function') {
+    onRenderedBuffer(renderedBuffer);
+  }
   throwIfCancelled();
 
   if (onProgress) onProgress(75);
@@ -457,7 +491,7 @@ export async function renderToAudioBuffer(sourceBuffer, settings, mode = 'previe
   let renderedBuffer = await offlineCtx.startRendering();
 
   const dspResult = applyDSPChain(renderedBuffer, settings, null, '[Cache Render]');
-  renderedBuffer = dspResult.buffer;
+  renderedBuffer = ensureFinalRenderSafety(dspResult.buffer, settings, '[Cache Render]');
 
   const finalLufs = measureLUFS(renderedBuffer);
   console.log('[Cache Render] Final LUFS:', finalLufs.toFixed(1));

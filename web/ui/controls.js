@@ -120,9 +120,10 @@ export function getCurrentSettings() {
  */
 export function getExportSettings() {
   const base = getCurrentSettings();
+  const selectedSampleRate = sampleRate.value === 'source' ? 'source' : parseInt(sampleRate.value) || 44100;
   return {
     ...base,
-    sampleRate: parseInt(sampleRate.value) || 44100,
+    sampleRate: selectedSampleRate,
     bitDepth: parseInt(bitDepth.value) || 16,
     ditherMode: (parseInt(bitDepth.value) || 16) === 16
       ? (ditherNoiseShaping?.checked ? 'noise-shaped' : 'tpdf')
@@ -312,7 +313,7 @@ export function setupOutputPresets(presets, onPresetApplied = null) {
  * @param {Object} presets - Output presets object
  */
 export function updateOutputPresetButtons(presets) {
-  const currentRate = parseInt(sampleRate.value);
+  const currentRate = sampleRate.value === 'source' ? 'source' : parseInt(sampleRate.value);
   const currentDepth = parseInt(bitDepth.value);
 
   document.querySelectorAll('.output-preset-btn').forEach(btn => {
