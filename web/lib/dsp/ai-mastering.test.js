@@ -478,6 +478,52 @@ describe('AI-generated mastering repair', () => {
     expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(75);
   });
 
+  it('returns every UI control needed to reset AI Auto from analysis', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [90, 0.18],
+        [280, 0.12],
+        [900, 0.1],
+        [4200, 0.08],
+        [10500, 0.05]
+      ]
+    });
+    const recommendation = getAIMasteringRecommendation(
+      analyzeAIGeneratedMastering(buffer),
+      { bitrateKbps: 192, isLossy: true }
+    );
+    const requiredKeys = [
+      'inputGain',
+      'targetLufs',
+      'truePeakCeiling',
+      'limiterCharacter',
+      'aiIntensity',
+      'sibilanceProtection',
+      'artifactProtection',
+      'referenceAmount',
+      'stereoWidth',
+      'centerBass',
+      'cleanLowEnd',
+      'glueCompression',
+      'deharsh',
+      'autoLevel',
+      'addPunch',
+      'addAir',
+      'cutMud',
+      'tapeWarmth'
+    ];
+
+    for (const key of requiredKeys) {
+      expect(recommendation).toHaveProperty(key);
+    }
+    expect(Number.isFinite(recommendation.inputGain)).toBe(true);
+    expect(Number.isFinite(recommendation.targetLufs)).toBe(true);
+    expect(Number.isFinite(recommendation.truePeakCeiling)).toBe(true);
+    expect(Number.isFinite(recommendation.aiIntensity)).toBe(true);
+    expect(Number.isFinite(recommendation.sibilanceProtection)).toBe(true);
+    expect(Number.isFinite(recommendation.artifactProtection)).toBe(true);
+  });
+
   it('recommends clarity and air for dark but safe lossy sources', () => {
     const buffer = makeToneBuffer({
       frequencies: [
@@ -497,7 +543,29 @@ describe('AI-generated mastering repair', () => {
 
     expect(profile.name).toBe('clarity');
     expect(recommendation.addAir).toBe(true);
+    expect(recommendation.cutMud).toBe(true);
     expect(recommendation.artifactProtection).toBeLessThanOrEqual(80);
+  });
+
+  it('opens veiled low-bitrate sources with mud cleanup instead of forced air', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [120, 0.08],
+        [280, 0.18],
+        [900, 0.08],
+        [3600, 0.012],
+        [12500, 0.003]
+      ]
+    });
+    const analysis = analyzeAIGeneratedMastering(buffer);
+    const recommendation = getAIMasteringRecommendation(analysis, {
+      bitrateKbps: 128,
+      isLossy: true
+    });
+
+    expect(recommendation.cutMud).toBe(true);
+    expect(recommendation.addAir).toBe(false);
+    expect(recommendation.truePeakCeiling).toBeLessThanOrEqual(-1.5);
   });
 
   it('keeps final calibration under the requested ceiling', () => {

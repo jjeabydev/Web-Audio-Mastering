@@ -226,6 +226,10 @@
               <span>Tone</span>
               <strong id="analysisToneValue">--</strong>
             </div>
+            <div class="analysis-item" data-tip="Suggested next move from the upload analysis and current protection state.">
+              <span>Action</span>
+              <button id="analysisActionValue" class="analysis-action-btn" type="button">Upload</button>
+            </div>
           </div>
           <label class="toggle-row"
             data-tip="Automatic AI/MP3 mastering repair: adapts harshness, mud, low-end cleanup, clipper drive, and final loudness behavior.">
@@ -407,10 +411,23 @@
             <span id="modeLimiterValue">Balanced</span>
             <span id="modeEqValue">EQ Flat</span>
           </div>
-          <button id="autoGainBtn" class="panel-action-btn" type="button"
-            data-tip="Re-apply source-safe input gain, true-peak ceiling, and loudness target from the current upload analysis without changing your chosen mode.">
-            Auto Gain
-          </button>
+          <div class="panel-action-row">
+            <button id="autoGainBtn" class="panel-action-btn" type="button"
+              data-tip="Re-apply source-safe gain, true-peak ceiling, loudness target, mud cleanup, and artifact protection from the current upload analysis without changing your chosen mode.">
+              Auto Gain
+            </button>
+            <button id="resetMasteringBtn" class="panel-action-btn ghost" type="button"
+              data-tip="Reset the current controls to AI Auto defaults from this file's latest analysis.">
+              Reset
+            </button>
+            <button id="reanalyzeBtn" class="panel-action-btn ghost" type="button"
+              data-tip="Run the upload analysis again and rebuild AI Auto defaults for this file.">
+              Analyze
+            </button>
+          </div>
+          <div class="control-help compact">
+            New uploads start fresh with AI Auto. Use Reset to return to the current analysis, or Analyze to measure the file again.
+          </div>
           <label class="toggle-row compact-toggle"
             data-tip="Keep enabled when comparing FX on/off. The original preview is level-matched so louder does not automatically sound better.">
             <span>Volume Match</span>

@@ -963,6 +963,7 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
 
   const stereoWidth = stereoRisk > 0.75 ? 95 : (stereoRisk < 0.15 && profile.name === 'spatial' ? 110 : 100);
   const darkButSafe = airDB < -24 && presenceToBodyDB < -10 && !fragileHighs && limiterRisk < 0.35 && analysis.codecStress < 0.28;
+  const muddyOrVeiled = mudDB > -7.5 || (airDB < -23 && presenceToBodyDB < -8 && harshDB < -12);
   const addAir = darkButSafe && !lowBitrate;
   const addPunch = !clippedOrPinned && limiterRisk < 0.55 && (peaks.loudestCrestDB ?? analysis.crestDB) > 7.5;
   const autoLevel = (peaks.dynamicSpreadDB ?? 0) > 7.5 && !clippedOrPinned;
@@ -985,6 +986,7 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
     autoLevel,
     addPunch,
     addAir,
+    cutMud: muddyOrVeiled,
     tapeWarmth: true,
     reasons: {
       codecStress: analysis.codecStress,

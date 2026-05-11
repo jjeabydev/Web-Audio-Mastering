@@ -222,6 +222,7 @@ const analysisRiskValue = document.getElementById('analysisRiskValue');
 const analysisSafeValue = document.getElementById('analysisSafeValue');
 const analysisHeadroomValue = document.getElementById('analysisHeadroomValue');
 const analysisToneValue = document.getElementById('analysisToneValue');
+const analysisActionValue = document.getElementById('analysisActionValue');
 const modeProfileValue = document.getElementById('modeProfileValue');
 const modeTargetValue = document.getElementById('modeTargetValue');
 const modeInputValue = document.getElementById('modeInputValue');
@@ -229,6 +230,8 @@ const modeCeilingValue = document.getElementById('modeCeilingValue');
 const modeLimiterValue = document.getElementById('modeLimiterValue');
 const modeEqValue = document.getElementById('modeEqValue');
 const autoGainBtn = document.getElementById('autoGainBtn');
+const resetMasteringBtn = document.getElementById('resetMasteringBtn');
+const reanalyzeBtn = document.getElementById('reanalyzeBtn');
 const levelMatchPanel = document.getElementById('levelMatchPanel');
 
 // Transport display elements
@@ -1218,10 +1221,12 @@ async function loadAudioFile(file) {
     fileState.originalSampleRate = decodedBuffer.sampleRate;
     fileState.estimatedBitrateKbps = Math.round((file.size * 8) / (decodedBuffer.duration * 1000));
     fileState.aiAnalysis = analyzeAIGeneratedMastering(decodedBuffer);
+    setAssistantPresetActive('ai-auto');
+    clearReferenceState();
     applyAIAutoRecommendation(fileState.aiAnalysis, {
       bitrateKbps: fileState.estimatedBitrateKbps,
       isLossy: /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(file.name)
-    });
+    }, { force: true });
 
     // Normalize to target LUFS using pure JavaScript
     const normalizedBuffer = normalizeToLUFS(decodedBuffer, targetLufsDb);
@@ -1534,13 +1539,17 @@ referenceInput.addEventListener('change', async (e) => {
 });
 
 clearReferenceBtn.addEventListener('click', () => {
-  setReferenceAnalysis(null);
-  referenceMatch.checked = false;
-  referenceName.textContent = 'No reference';
+  clearReferenceState();
   markCustomPreset();
   schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
   updateChecklist();
 });
+
+function clearReferenceState() {
+  setReferenceAnalysis(null);
+  referenceMatch.checked = false;
+  referenceName.textContent = 'No reference';
+}
 
 // Handle file input change
 fileInput.addEventListener('change', async (e) => {
@@ -2024,6 +2033,59 @@ function getToneLabel(analysis = fileState.aiAnalysis) {
   return 'Open';
 }
 
+function getAnalysisActionLabel(analysis = fileState.aiAnalysis) {
+  if (!analysis) return 'Upload';
+  const headroom = getSourceHeadroomDB(analysis);
+  if (Number.isFinite(headroom) && headroom < 4) return 'Auto Gain';
+
+  const risk = getSourceRiskLabel(analysis);
+  if (risk === 'Limiter' || risk === 'Codec') return 'AI Clean';
+  if (risk === 'Stereo') return 'Center Bass';
+
+  const tone = getToneLabel(analysis);
+  if (tone === 'Dull' || tone === 'Veiled' || tone === 'Muddy') return 'Clarity';
+  if (tone === 'Harsh') return 'AI Clean';
+  return 'Ready';
+}
+
+function applyAnalysisAction() {
+  const action = getAnalysisActionLabel();
+
+  if (action === 'Upload') {
+    fileInput.click();
+    return;
+  }
+
+  if (action === 'Auto Gain') {
+    applySourceSafeGain();
+    return;
+  }
+
+  if (action === 'AI Clean') {
+    applyAssistantPreset('ai-clean');
+    showToast('AI Clean applied from analysis.', 'success', 1600);
+    return;
+  }
+
+  if (action === 'Center Bass') {
+    centerBass.checked = true;
+    updateAudioChain({ immediate: playerState.isPlaying && !playerState.isBypassed });
+    updateChecklist();
+    updateControlPanelSummary();
+    showToast('Center Bass enabled for safer stereo translation.', 'success', 1800);
+    return;
+  }
+
+  if (action === 'Clarity') {
+    aiProfile.value = 'clarity';
+    applyAIProfileSelectionDefaults();
+    showToast('Clarity applied to reduce muddiness.', 'success', 1600);
+    return;
+  }
+
+  showToast('Analysis looks ready.', 'success', 1200);
+}
+
 function formatProfileName(value) {
   if (!value) return 'Auto';
   return value
@@ -2076,6 +2138,7 @@ function updateControlPanelSummary() {
   if (analysisRiskValue) analysisRiskValue.textContent = getSourceRiskLabel();
   if (analysisHeadroomValue) analysisHeadroomValue.textContent = getHeadroomLabel();
   if (analysisToneValue) analysisToneValue.textContent = getToneLabel();
+  if (analysisActionValue) analysisActionValue.textContent = getAnalysisActionLabel();
   if (analysisSafeValue) {
     const safeOn = truePeakLimit.checked && cleanLowEnd.checked && centerBass.checked;
     const lossySafe = !currentFile || !/\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentFile.name) || ceilingValueDb <= -1.4;
@@ -2149,6 +2212,7 @@ const AI_MODE_DEFAULTS = {
     addPunch: true,
     tapeWarmth: true,
     addAir: false,
+    cutMud: false,
     stereoWidth: 100,
     referenceAmount: 65,
     cleanLowEnd: true,
@@ -2169,6 +2233,7 @@ const AI_MODE_DEFAULTS = {
     addPunch: false,
     tapeWarmth: true,
     addAir: false,
+    cutMud: true,
     stereoWidth: 98,
     referenceAmount: 60,
     cleanLowEnd: true,
@@ -2189,6 +2254,7 @@ const AI_MODE_DEFAULTS = {
     addPunch: true,
     tapeWarmth: true,
     addAir: false,
+    cutMud: true,
     stereoWidth: 100,
     referenceAmount: 60,
     cleanLowEnd: true,
@@ -2209,6 +2275,7 @@ const AI_MODE_DEFAULTS = {
     addPunch: true,
     tapeWarmth: true,
     addAir: false,
+    cutMud: false,
     stereoWidth: 100,
     referenceAmount: 65,
     cleanLowEnd: true,
@@ -2229,6 +2296,7 @@ const AI_MODE_DEFAULTS = {
     addPunch: false,
     tapeWarmth: false,
     addAir: false,
+    cutMud: false,
     stereoWidth: 100,
     referenceAmount: 65,
     cleanLowEnd: true,
@@ -2237,17 +2305,17 @@ const AI_MODE_DEFAULTS = {
     centerBass: true,
     autoLevel: false
   },
-  universal: { aiProfile: 'universal', aiIntensity: 105, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, stereoWidth: 100 },
-  fire: { aiProfile: 'fire', aiIntensity: 110, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11, limiterCharacter: 'punch', addPunch: true, tapeWarmth: true, addAir: false, stereoWidth: 100 },
-  clarity: { aiProfile: 'clarity', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: true, addAir: true, stereoWidth: 100 },
-  tape: { aiProfile: 'tape', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, stereoWidth: 100 },
-  natural: { aiProfile: 'natural', aiIntensity: 95, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, stereoWidth: 100 },
-  spatial: { aiProfile: 'spatial', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: true, addAir: false, stereoWidth: 105 },
-  cinematic: { aiProfile: 'cinematic', aiIntensity: 100, sibilanceProtection: 65, artifactProtection: 70, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, stereoWidth: 102 },
-  punchy: { aiProfile: 'punchy', aiIntensity: 105, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11.5, limiterCharacter: 'punch', addPunch: true, tapeWarmth: true, addAir: false, stereoWidth: 100 },
-  warm: { aiProfile: 'warm', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, stereoWidth: 100 },
-  vocal: { aiProfile: 'vocal', aiIntensity: 100, sibilanceProtection: 80, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, stereoWidth: 98 },
-  bass: { aiProfile: 'bass', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, stereoWidth: 98 }
+  universal: { aiProfile: 'universal', aiIntensity: 105, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 100 },
+  fire: { aiProfile: 'fire', aiIntensity: 110, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11, limiterCharacter: 'punch', addPunch: true, tapeWarmth: true, addAir: false, cutMud: true, stereoWidth: 100 },
+  clarity: { aiProfile: 'clarity', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: true, addAir: true, cutMud: true, stereoWidth: 100 },
+  tape: { aiProfile: 'tape', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 100 },
+  natural: { aiProfile: 'natural', aiIntensity: 95, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 100 },
+  spatial: { aiProfile: 'spatial', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 105 },
+  cinematic: { aiProfile: 'cinematic', aiIntensity: 100, sibilanceProtection: 65, artifactProtection: 70, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 102 },
+  punchy: { aiProfile: 'punchy', aiIntensity: 105, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11.5, limiterCharacter: 'punch', addPunch: true, tapeWarmth: true, addAir: false, cutMud: true, stereoWidth: 100 },
+  warm: { aiProfile: 'warm', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 100 },
+  vocal: { aiProfile: 'vocal', aiIntensity: 100, sibilanceProtection: 80, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: true, stereoWidth: 98 },
+  bass: { aiProfile: 'bass', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, cutMud: true, stereoWidth: 98 }
 };
 
 function refineModeDefaultsForCurrentSource(defaults) {
@@ -2278,6 +2346,8 @@ function refineModeDefaultsForCurrentSource(defaults) {
     (profile.metallicDB ?? -18) < -14 &&
     limiterRisk < 0.35 &&
     codecStress < 0.28;
+  const muddyOrVeiled = (profile.mudDB ?? -18) > -7.5 ||
+    ((profile.airDB ?? -18) < -23 && (profile.presenceToBodyDB ?? 0) < -8 && (profile.harshDB ?? -18) < -12);
 
   if (clippedOrPinned || limiterRisk > 0.55 || (peaks.loudestCrestDB ?? 12) < 6.5) {
     refined.inputGain = Math.min(refined.inputGain ?? -3.5, -5.5);
@@ -2304,6 +2374,10 @@ function refineModeDefaultsForCurrentSource(defaults) {
     refined.addAir = true;
     refined.artifactProtection = Math.min(refined.artifactProtection ?? 75, 75);
     refined.sibilanceProtection = Math.min(refined.sibilanceProtection ?? 70, 75);
+  }
+
+  if (muddyOrVeiled) {
+    refined.cutMud = true;
   }
 
   if (stereoRisk > 0.75) {
@@ -2369,6 +2443,7 @@ function applyModeDefaults(defaults, options = {}) {
   addPunch.checked = merged.addPunch;
   tapeWarmth.checked = merged.tapeWarmth;
   addAir.checked = merged.addAir;
+  cutMud.checked = merged.cutMud;
   stereoWidthSlider.value = String(merged.stereoWidth);
   if (options.resetEQ !== false) {
     resetEQToFlat();
@@ -2393,6 +2468,7 @@ function applyAIAutoRecommendation(analysis, source = {}, options = {}) {
   autoLevel.checked = recommendation.autoLevel;
   addPunch.checked = recommendation.addPunch;
   addAir.checked = recommendation.addAir;
+  cutMud.checked = recommendation.cutMud;
   tapeWarmth.checked = recommendation.tapeWarmth;
   limiterCharacter.value = recommendation.limiterCharacter;
   aiIntensity.value = String(recommendation.aiIntensity);
@@ -2436,6 +2512,9 @@ function applySourceSafeGain() {
   truePeakLimit.checked = true;
   cleanLowEnd.checked = recommendation.cleanLowEnd;
   centerBass.checked = recommendation.centerBass;
+  cutMud.checked = recommendation.cutMud;
+  sibilanceProtection.value = String(recommendation.sibilanceProtection);
+  artifactProtection.value = String(recommendation.artifactProtection);
   if (faders.inputGain) {
     faders.inputGain.setValue(recommendation.inputGain, true);
   }
@@ -2447,6 +2526,43 @@ function applySourceSafeGain() {
   schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
   updateChecklist();
   showToast('Auto Gain applied from source analysis.', 'success', 1800);
+}
+
+function resetMasteringFromAnalysis(options = {}) {
+  const { reanalyze = false, toast = false } = options;
+
+  if (!fileState.originalBuffer) {
+    showToast('Upload a song first so AI Auto can analyze it.', 'error');
+    return null;
+  }
+
+  if (reanalyze || !fileState.aiAnalysis) {
+    fileState.aiAnalysis = analyzeAIGeneratedMastering(fileState.originalBuffer);
+    fileState.aiAutoRecommendation = null;
+  }
+
+  clearReferenceState();
+  setAssistantPresetActive('ai-auto');
+
+  const recommendation = applyAIAutoRecommendation(
+    fileState.aiAnalysis,
+    getCurrentSourceDescriptor(),
+    { force: true }
+  );
+
+  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  updateOutputPresetButtons(outputPresets);
+  updateChecklist();
+
+  if (toast) {
+    showToast(
+      reanalyze ? 'Re-analyzed and reset AI Auto defaults.' : 'Reset to AI Auto defaults.',
+      'success',
+      1800
+    );
+  }
+
+  return recommendation;
 }
 
 function applyAssistantPreset(name) {
@@ -2581,6 +2697,18 @@ aiProfile.addEventListener('change', () => {
 
 autoGainBtn?.addEventListener('click', () => {
   applySourceSafeGain();
+});
+
+resetMasteringBtn?.addEventListener('click', () => {
+  resetMasteringFromAnalysis({ toast: true });
+});
+
+reanalyzeBtn?.addEventListener('click', () => {
+  resetMasteringFromAnalysis({ reanalyze: true, toast: true });
+});
+
+analysisActionValue?.addEventListener('click', () => {
+  applyAnalysisAction();
 });
 
 aiIntensity.addEventListener('input', () => {

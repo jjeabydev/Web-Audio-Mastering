@@ -683,6 +683,30 @@ body:not(.advanced-mode) .loudness-card {
   white-space: nowrap;
 }
 
+.analysis-action-btn {
+  width: 100%;
+  margin-top: 3px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--theme-accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.analysis-action-btn:hover,
+.analysis-action-btn:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+}
+
 .mode-strip {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -709,6 +733,24 @@ body:not(.advanced-mode) .loudness-card {
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;
+}
+
+.panel-action-row {
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr 0.95fr;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.panel-action-row .panel-action-btn {
+  margin: 0;
+  min-width: 0;
+}
+
+.panel-action-btn.ghost {
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--text-secondary);
+  border-color: var(--border-subtle);
 }
 
 .panel-action-btn:hover {
