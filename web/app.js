@@ -162,6 +162,11 @@ const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
 const statusMessage = document.getElementById('statusMessage');
 const seekBar = document.getElementById('seekBar');
+const playBtn = document.getElementById('playBtn');
+const stopBtn = document.getElementById('stopBtn');
+const bypassBtn = document.getElementById('bypassBtn');
+const peakL = document.getElementById('peakL');
+const peakR = document.getElementById('peakR');
 
 // Toast helper with auto-clear
 let toastTimeout = null;
@@ -235,6 +240,11 @@ const modeEqValue = document.getElementById('modeEqValue');
 const autoGainBtn = document.getElementById('autoGainBtn');
 const resetMasteringBtn = document.getElementById('resetMasteringBtn');
 const reanalyzeBtn = document.getElementById('reanalyzeBtn');
+const clearSessionBtn = document.getElementById('clearSessionBtn');
+const topResetMasteringBtn = document.getElementById('topResetMasteringBtn');
+const topReanalyzeBtn = document.getElementById('topReanalyzeBtn');
+const topClearBtn = document.getElementById('topClearBtn');
+const topNoneBtn = document.getElementById('topNoneBtn');
 const levelMatchPanel = document.getElementById('levelMatchPanel');
 
 // Transport display elements
@@ -271,6 +281,42 @@ function updateDitherControlState() {
   const is16Bit = (parseInt(bitDepth.value) || 16) === 16;
   ditherNoiseShaping.disabled = !is16Bit;
   ditherNoiseShapingRow.classList.toggle('disabled', !is16Bit);
+}
+
+function resetOutputToStreamingDefault() {
+  const streaming = outputPresets.streaming || { sampleRate: 'source', bitDepth: 24 };
+  sampleRate.value = String(streaming.sampleRate);
+  bitDepth.value = String(streaming.bitDepth);
+  ditherNoiseShaping.checked = false;
+  updateDitherControlState();
+  updateOutputPresetButtons(outputPresets);
+  updateExportFormatSummary();
+  clearExportQualitySummary();
+}
+
+function resetTransportPreviewState() {
+  playerState.isBypassed = false;
+  playerState.isSeeking = false;
+  playerState.pauseTime = 0;
+  playerState.startTime = 0;
+  if (playerState.seekUpdateInterval) {
+    clearInterval(playerState.seekUpdateInterval);
+    playerState.seekUpdateInterval = null;
+  }
+  if (playerState.seekTimeout) {
+    clearTimeout(playerState.seekTimeout);
+    playerState.seekTimeout = null;
+  }
+  bypassBtn?.classList.remove('active');
+  const bypassLabel = bypassBtn?.querySelector('.bypass-label');
+  if (bypassLabel) bypassLabel.textContent = 'FX';
+  syncLevelMatchControls(true);
+}
+
+function resetSpectrogramView() {
+  spectrogram.stop();
+  spectrogramContainer?.classList.add('hidden');
+  spectroBtn?.classList.remove('active');
 }
 
 async function cleanupAudioContext() {
@@ -877,6 +923,8 @@ function scheduleRenderToCache(options = {}) {
     delayMs = immediate ? 0 : CACHE_RENDER_DEBOUNCE_MS
   } = options;
 
+  clearExportQualitySummary();
+
   // Clear any pending render
   if (cacheRenderTimeout) {
     clearTimeout(cacheRenderTimeout);
@@ -1242,6 +1290,7 @@ async function loadAudioFile(file) {
     fileState.originalSampleRate = decodedBuffer.sampleRate;
     fileState.estimatedBitrateKbps = Math.round((file.size * 8) / (decodedBuffer.duration * 1000));
     fileState.aiAnalysis = analyzeAIGeneratedMastering(decodedBuffer);
+    resetOutputToStreamingDefault();
     updateExportFormatSummary();
     setAssistantPresetActive('ai-auto');
     clearReferenceState();
@@ -1573,6 +1622,88 @@ function clearReferenceState() {
   referenceName.textContent = 'No reference';
 }
 
+async function clearCurrentSession({ toast = true } = {}) {
+  if (isProcessing) {
+    showToast('Cannot clear while export is processing.', 'error');
+    return;
+  }
+
+  if (cacheRenderTimeout) {
+    clearTimeout(cacheRenderTimeout);
+    cacheRenderTimeout = null;
+  }
+  if (liveWaveformTimeout) {
+    clearTimeout(liveWaveformTimeout);
+    liveWaveformTimeout = null;
+  }
+  if (lufsDebounceTimeout) {
+    clearTimeout(lufsDebounceTimeout);
+    lufsDebounceTimeout = null;
+  }
+  cacheRenderQueued = false;
+  cacheRenderQueuedImmediate = false;
+
+  stopAudio();
+  stopMeter();
+  await cleanupAudioContext();
+  destroyWaveSurfer();
+  resetTransportPreviewState();
+  resetSpectrogramView();
+
+  currentFile = null;
+  fileInput.value = '';
+  fileState.selectedFilePath = null;
+  fileState.originalBuffer = null;
+  fileState.normalizedBuffer = null;
+  fileState.normalizedTargetLufs = null;
+  fileState.processedBuffer = null;
+  fileState.isNormalizing = false;
+  fileState.isProcessingEffects = false;
+  fileState.dcOffset = null;
+  fileState.cachedRenderBuffer = null;
+  fileState.cachedRenderLufs = null;
+  fileState.isRenderingCache = false;
+  fileState.estimatedBitrateKbps = null;
+  fileState.aiAnalysis = null;
+  fileState.aiAutoRecommendation = null;
+  fileState.waveformMode = 'original';
+  fileState.forceLivePreview = false;
+  fileState.originalLufs = null;
+  fileState.originalTruePeak = null;
+  fileState.originalSampleRate = null;
+  fileState.cacheRenderVersion++;
+
+  clearReferenceState();
+  applyModeDefaults(AI_MODE_DEFAULTS.auto);
+  resetOutputToStreamingDefault();
+  setAssistantPresetActive('ai-auto');
+  clearExportQualitySummary();
+
+  fileName.textContent = 'No file';
+  fileMeta.textContent = '--';
+  durationEl.textContent = '0:00';
+  currentTimeEl.textContent = '0:00';
+  seekBar.value = 0;
+  seekBar.max = 100;
+  outputLufsDisplay.textContent = '-- LUFS';
+  peakL.textContent = 'L: -∞ dB';
+  peakR.textContent = 'R: -∞ dB';
+  dcOffsetBadge?.classList.add('hidden');
+  fileLoaded.classList.add('hidden');
+  fileZoneContent.classList.remove('hidden');
+  document.body.classList.remove('audio-loaded');
+  processBtn.disabled = true;
+  playBtn.disabled = true;
+  stopBtn.disabled = true;
+  playerState.pauseTime = 0;
+
+  updateChecklist();
+
+  if (toast) {
+    showToast('Cleared current file and mastering state.', 'success', 1800);
+  }
+}
+
 // Handle file input change
 fileInput.addEventListener('change', async (e) => {
   const file = e.target.files[0];
@@ -1593,6 +1724,8 @@ async function loadFile(file) {
   try {
     // Cleanup previous AudioContext to prevent memory leaks
     await cleanupAudioContext();
+    resetTransportPreviewState();
+    resetSpectrogramView();
 
     // Store file reference for browser
     currentFile = file;
@@ -2684,7 +2817,7 @@ function resetMasteringFromAnalysis(options = {}) {
 
   if (toast) {
     showToast(
-      reanalyze ? 'Re-analyzed and reset AI Auto defaults.' : 'Reset to AI Auto defaults.',
+      reanalyze ? 'Analyzed again and reset to AI Auto defaults.' : 'Reset to latest AI Auto defaults.',
       'success',
       1800
     );
@@ -2835,6 +2968,27 @@ reanalyzeBtn?.addEventListener('click', () => {
   resetMasteringFromAnalysis({ reanalyze: true, toast: true });
 });
 
+clearSessionBtn?.addEventListener('click', () => {
+  clearCurrentSession({ toast: true });
+});
+
+topResetMasteringBtn?.addEventListener('click', () => {
+  resetMasteringFromAnalysis({ toast: true });
+});
+
+topReanalyzeBtn?.addEventListener('click', () => {
+  resetMasteringFromAnalysis({ reanalyze: true, toast: true });
+});
+
+topClearBtn?.addEventListener('click', () => {
+  clearCurrentSession({ toast: true });
+});
+
+topNoneBtn?.addEventListener('click', () => {
+  applyAssistantPreset('manual');
+  showToast('Automatic mastering cleared. Manual/None is active.', 'success', 1800);
+});
+
 analysisActionValue?.addEventListener('click', () => {
   applyAnalysisAction();
 });
@@ -2958,58 +3112,26 @@ async function renormalizeAudio(newTargetLufs) {
   }
   isRenormalizing = true;
 
-  // Store playback state
-  const wasPlaying = playerState.isPlaying;
-  const playbackPosition = wasPlaying ?
-    (audioNodes.context.currentTime - playerState.startTime) :
-    playerState.pauseTime;
-
-  // Stop playback if playing
-  if (wasPlaying) {
-    stopAudio();
-    stopMeter();
-  }
-
-  // Disable transport controls
-  playBtn.disabled = true;
-  stopBtn.disabled = true;
-
   try {
-    // Show modal
-    showLoadingModal(`Normalizing to ${newTargetLufs} LUFS...`, 10);
-
-    // Allow UI to update
-    await new Promise(resolve => setTimeout(resolve, 20));
-
-    showLoadingModal(`Normalizing to ${newTargetLufs} LUFS...`, 30);
+    // Keep loudness changes non-blocking. Export/cache rendering uses the original
+    // buffer and final LUFS target; this background buffer only keeps level-matched
+    // bypass and live fallback close to the selected target.
+    await new Promise(resolve => setTimeout(resolve, 0));
 
     // Re-normalize to new target
     const normalizedBuffer = normalizeToLUFS(fileState.originalBuffer, newTargetLufs);
-
-    showLoadingModal(`Normalizing to ${newTargetLufs} LUFS...`, 80);
 
     // Update normalized buffer
     fileState.normalizedBuffer = normalizedBuffer;
     fileState.normalizedTargetLufs = newTargetLufs;
 
-    // Re-apply effects (denoise, exciter) if enabled
-    await processEffects();
+    schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
 
   } catch (error) {
     console.error('Re-normalization failed:', error);
     showToast(`Normalization failed: ${error.message}`, 'error');
   } finally {
-    // Hide modal and re-enable controls
-    hideLoadingModal();
-    playBtn.disabled = false;
-    stopBtn.disabled = false;
     isRenormalizing = false;
-
-    // Restore playback position
-    playerState.pauseTime = Math.min(playbackPosition, audioNodes.buffer?.duration || 0);
-    seekBar.value = playerState.pauseTime;
-    currentTimeEl.textContent = formatTime(playerState.pauseTime);
-    updateWaveSurferProgress(playerState.pauseTime, audioNodes.buffer?.duration);
   }
 }
 
@@ -3019,6 +3141,7 @@ targetLufsSlider.addEventListener('input', () => {
   // Update display immediately
   setTargetLufs(newValue);
   targetLufsValue.textContent = `${newValue} LUFS`;
+  markCustomPreset();
   updateControlPanelSummary();
 
   if (lufsDebounceTimeout) {
@@ -3026,12 +3149,9 @@ targetLufsSlider.addEventListener('input', () => {
     lufsDebounceTimeout = null;
   }
 
-  if (playerState.isPlaying && !playerState.isBypassed) {
-    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
-    return;
-  }
+  schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
 
-  // Debounce the re-normalization (wait for user to stop sliding)
+  // Debounce level-match buffer refresh; the audible/export chain reacts via cache render.
   lufsDebounceTimeout = setTimeout(() => {
     renormalizeAudio(newValue);
   }, 500); // 500ms debounce
@@ -3042,6 +3162,7 @@ targetLufsSlider.addEventListener('input', () => {
     updateDitherControlState();
     updateOutputPresetButtons(outputPresets);
     updateExportFormatSummary();
+    clearExportQualitySummary();
   });
 });
 
@@ -3197,6 +3318,7 @@ setupOutputPresets(outputPresets, () => {
   updateDitherControlState();
   updateOutputPresetButtons(outputPresets);
   updateExportFormatSummary();
+  clearExportQualitySummary();
 });
 updateDitherControlState();
 updateOutputPresetButtons(outputPresets);

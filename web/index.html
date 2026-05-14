@@ -186,6 +186,16 @@
           <button class="assistant-preset custom-state hidden" type="button" data-mastering-preset="custom"
             data-tip="You changed detailed controls after choosing a preset. AI Mastering is still active; this is your custom version.">Custom</button>
         </div>
+        <div class="assistant-actions" aria-label="Mastering actions">
+          <button id="topResetMasteringBtn" class="assistant-action-btn" type="button"
+            data-tip="Reset all mastering controls to the current upload's latest AI Auto recommendation without re-measuring the file.">Reset</button>
+          <button id="topReanalyzeBtn" class="assistant-action-btn" type="button"
+            data-tip="Re-measure the uploaded file, rebuild the AI Auto recommendation, then reset controls to it.">Analyze + Reset</button>
+          <button id="topClearBtn" class="assistant-action-btn ghost" type="button"
+            data-tip="Clear the current file, analysis, reference, cached preview, and export quality result.">Clear</button>
+          <button id="topNoneBtn" class="assistant-action-btn ghost" type="button"
+            data-tip="Clear automatic mastering and switch to Manual/None so you can shape the track yourself.">None</button>
+        </div>
         <div class="quick-guide" data-tip="Quick flow: upload a song, keep AI Auto, press Play, adjust Metallic/Sibilance only if needed, then Export WAV.">
           <span class="guide-step">1 Upload</span>
           <span class="guide-step">2 Play</span>
@@ -422,16 +432,20 @@
               Auto Gain
             </button>
             <button id="resetMasteringBtn" class="panel-action-btn ghost" type="button"
-              data-tip="Reset the current controls to AI Auto defaults from this file's latest analysis.">
+              data-tip="Reset the current controls to AI Auto defaults from this file's latest analysis without re-measuring the file.">
               Reset
             </button>
             <button id="reanalyzeBtn" class="panel-action-btn ghost" type="button"
-              data-tip="Run the upload analysis again and rebuild AI Auto defaults for this file.">
-              Analyze
+              data-tip="Run the upload analysis again, rebuild AI Auto defaults, and reset the controls to those defaults.">
+              Analyze + Reset
+            </button>
+            <button id="clearSessionBtn" class="panel-action-btn ghost" type="button"
+              data-tip="Clear the current file, analysis, reference, cached preview, and export quality result.">
+              Clear
             </button>
           </div>
           <div class="control-help compact">
-            New uploads start fresh with AI Auto. Use Reset to return to the current analysis, or Analyze to measure the file again.
+            New uploads start fresh with AI Auto. Use Reset to return to the latest analysis, Analyze + Reset to measure again, or Clear to start over.
           </div>
           <label class="toggle-row compact-toggle"
             data-tip="Keep enabled when comparing FX on/off. The original preview is level-matched so louder does not automatically sound better.">

@@ -559,7 +559,15 @@ body:not(.advanced-mode) .loudness-card {
   width: min(700px, 100%);
 }
 
-.assistant-preset {
+.assistant-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(54px, 1fr));
+  gap: 6px;
+  width: min(330px, 100%);
+}
+
+.assistant-preset,
+.assistant-action-btn {
   height: 32px;
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.04);
@@ -571,7 +579,13 @@ body:not(.advanced-mode) .loudness-card {
   transition: all 0.15s ease;
 }
 
-.assistant-preset:hover {
+.assistant-action-btn {
+  font-size: 11px;
+  border-color: var(--border-subtle);
+}
+
+.assistant-preset:hover,
+.assistant-action-btn:hover {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-primary);
 }
@@ -586,6 +600,10 @@ body:not(.advanced-mode) .loudness-card {
   background: rgba(255, 255, 255, 0.12);
   border-color: rgba(255, 255, 255, 0.24);
   color: var(--text-primary);
+}
+
+.assistant-action-btn.ghost {
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .advanced-toggle {
@@ -745,7 +763,7 @@ body:not(.advanced-mode) .loudness-card {
 
 .panel-action-row {
   display: grid;
-  grid-template-columns: 1.15fr 0.85fr 0.95fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   margin-bottom: 8px;
 }
@@ -1534,6 +1552,11 @@ body {
 
   .assistant-presets {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .assistant-actions {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     width: 100%;
   }
 
