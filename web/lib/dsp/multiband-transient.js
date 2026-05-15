@@ -12,10 +12,11 @@
  * @param {Function} onProgress - Progress callback (0-1)
  * @returns {AudioBuffer} - Processed audio buffer
  */
-export function applyMultibandTransient(buffer, onProgress = () => { }) {
+export function applyMultibandTransient(buffer, onProgress = () => { }, options = {}) {
   const sampleRate = buffer.sampleRate;
   const numChannels = buffer.numberOfChannels;
   const length = buffer.length;
+  const amount = Math.max(0, Math.min(1, options.amount ?? 1));
 
   // Crossover frequencies
   const f1 = 200;   // Low-Mid crossover
@@ -28,7 +29,7 @@ export function applyMultibandTransient(buffer, onProgress = () => { }) {
       fastRelease: 0.050,   // 50ms
       slowAttack: 0.025,    // 25ms
       slowRelease: 0.250,   // 250ms
-      transientGain: 2,     // +2dB (Reduced from +4dB to prevent limiter slamming)
+      transientGain: 2 * amount,     // +2dB max (Reduced from +4dB to prevent limiter slamming)
       sustainGain: -1,      // -1dB (Gentler cleanup)
       smoothing: 0.020      // 20ms
     },
@@ -37,7 +38,7 @@ export function applyMultibandTransient(buffer, onProgress = () => { }) {
       fastRelease: 0.040,   // 40ms
       slowAttack: 0.020,    // 20ms
       slowRelease: 0.200,   // 200ms
-      transientGain: 6,     // +6dB (Aggressive snap for snare/vocals)
+      transientGain: 6 * amount,     // +6dB max (Aggressive snap for snare/vocals)
       sustainGain: 0,       // 0dB
       smoothing: 0.020      // 20ms
     },
@@ -46,7 +47,7 @@ export function applyMultibandTransient(buffer, onProgress = () => { }) {
       fastRelease: 0.030,   // 30ms
       slowAttack: 0.015,    // 15ms
       slowRelease: 0.150,   // 150ms
-      transientGain: 2,     // +2dB (Add some click)
+      transientGain: 2 * amount,     // +2dB max (Add some click)
       sustainGain: 0,       // 0dB
       smoothing: 0.020      // 20ms
     }

@@ -6,6 +6,7 @@
 import {
   measureLUFS,
   normalizeToLUFS,
+  applyGain,
   applyExciter,
   applyTapeWarmth,
   processHybridDynamic,
@@ -20,6 +21,7 @@ import {
   applyReferenceMatch,
   applyLimiterStressGuard,
   applyStereoStabilityGuard,
+  applyPianoHighArtifactSuppressor,
   finalizeMasteringTarget,
   findTruePeak
 } from '../lib/dsp/index.js';
@@ -40,10 +42,19 @@ import { encodeWAVAsync, createOfflineNodes } from './encoder.js';
 function createRenderContext(sourceBuffer, settings, targetSampleRate) {
   const duration = sourceBuffer.duration;
   const numSamples = Math.ceil(duration * targetSampleRate);
+  const artifactSafeMode = settings.isLossySource ||
+    (settings.artifactProtection ?? 0) >= 0.78 ||
+    (settings.sibilanceProtection ?? 0) >= 0.75;
 
-  const offlineCtx = new OfflineAudioContext(2, numSamples, targetSampleRate);
+  const channelCount = artifactSafeMode ? sourceBuffer.numberOfChannels : 2;
+  const offlineCtx = new OfflineAudioContext(channelCount, numSamples, targetSampleRate);
   const source = offlineCtx.createBufferSource();
   source.buffer = sourceBuffer;
+
+  if (artifactSafeMode) {
+    source.connect(offlineCtx.destination);
+    return { offlineCtx, source, nodes: null };
+  }
 
   const nodes = createOfflineNodes(offlineCtx, settings);
 
@@ -91,9 +102,15 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     softClipDrive: 1.5,
     maxLimiterPushDB: 1.2
   };
+  const artifactSafeMode = settings.isLossySource ||
+    (settings.artifactProtection ?? 0) >= 0.78 ||
+    (settings.sibilanceProtection ?? 0) >= 0.75;
+  const targetLufs = artifactSafeMode
+    ? Math.min(settings.targetLufs ?? -14, -14.5)
+    : settings.targetLufs;
 
   // 1. Deharsh / Hybrid Dynamic Processor (if enabled)
-  if (settings.deharsh) {
+  if (settings.deharsh && !artifactSafeMode) {
     console.log(`${logPrefix} Applying hybrid dynamic processor...`);
     renderedBuffer = processHybridDynamic(renderedBuffer, 'mastering', (p) => {
       if (onProgress) onProgress(p * 0.15);
@@ -102,13 +119,14 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   if (onProgress) onProgress(0.15);
 
   // 1.5 AI-generated / lossy-source repair
-  if (settings.aiEnhance !== false) {
+  if (settings.aiEnhance !== false && !artifactSafeMode) {
     console.log(`${logPrefix} Applying AI-source repair...`);
     const repaired = applyAIGeneratedMasteringRepair(renderedBuffer, {
       profile: settings.aiProfile || 'auto',
       intensity: settings.aiIntensity ?? 1,
       sibilanceProtection: settings.sibilanceProtection ?? 0.6,
       artifactProtection: settings.artifactProtection ?? 0.7,
+      isLossySource: settings.isLossySource,
       cleanLowEnd: settings.cleanLowEnd
     });
     renderedBuffer = repaired.buffer;
@@ -119,7 +137,7 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   }
   if (onProgress) onProgress(0.22);
 
-  if (settings.autoLevel) {
+  if (settings.autoLevel && !artifactSafeMode) {
     console.log(`${logPrefix} Applying auto level...`);
     renderedBuffer = applyDynamicLeveling(renderedBuffer, {
       windowMs: 250,
@@ -157,13 +175,21 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   // 4. Multiband Transient / Add Punch (if enabled)
   if (settings.addPunch) {
     console.log(`${logPrefix} Applying multiband transient...`);
+    const transientAmount = settings.isLossySource || (settings.artifactProtection ?? 0) >= 0.78
+      ? 0.45
+      : 1;
     renderedBuffer = applyMultibandTransient(renderedBuffer, (p) => {
       if (onProgress) onProgress(0.45 + p * 0.15);
-    });
+    }, { amount: transientAmount });
   }
   if (onProgress) onProgress(0.60);
 
-  if (settings.referenceMatch && settings.referenceAnalysis) {
+  if (artifactSafeMode) {
+    console.log(`${logPrefix} Suppressing high-note piano artifacts...`);
+    renderedBuffer = applyPianoHighArtifactSuppressor(renderedBuffer, { amount: 0.7 });
+  }
+
+  if (settings.referenceMatch && settings.referenceAnalysis && !artifactSafeMode) {
     console.log(`${logPrefix} Matching reference tone...`);
     const matched = applyReferenceMatch(renderedBuffer, settings.referenceAnalysis, {
       amount: settings.referenceAmount ?? 0.65
@@ -174,7 +200,7 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     }
   }
 
-  if (renderedBuffer.numberOfChannels === 2 && settings.aiEnhance !== false) {
+  if (renderedBuffer.numberOfChannels === 2 && settings.aiEnhance !== false && !artifactSafeMode) {
     console.log(`${logPrefix} Stabilizing AI stereo image...`);
     const stereoGuarded = applyStereoStabilityGuard(renderedBuffer, {
       amount: settings.aiIntensity ?? 1
@@ -185,7 +211,7 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     }
   }
 
-  if (renderedBuffer.numberOfChannels === 2 && settings.aiEnhance !== false) {
+  if (renderedBuffer.numberOfChannels === 2 && settings.aiEnhance !== false && !artifactSafeMode) {
     const baseWidth = Number.isFinite(Number(settings.stereoWidth)) ? Number(settings.stereoWidth) / 100 : 1;
     const profileWidth = aiProfile.stereoWidthScale ?? 1;
     const effectiveWidth = Math.max(0, Math.min(2, baseWidth * profileWidth));
@@ -197,7 +223,7 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
 
   // 5. Apply adaptive final air cleanup.
   // Note: HPF (Clean Low End) is already handled by the WebAudio highpass node in the offline render graph.
-  const finalFilterAnalysis = settings.aiEnhance !== false ? analyzeAIGeneratedMastering(renderedBuffer) : null;
+  const finalFilterAnalysis = settings.aiEnhance !== false && !artifactSafeMode ? analyzeAIGeneratedMastering(renderedBuffer) : null;
   const finalFilterOptions = getAdaptiveFinalFilterOptions(finalFilterAnalysis, settings);
   console.log(`${logPrefix} Applying final air cleanup...`, finalFilterOptions);
   renderedBuffer = applyFinalFilters(renderedBuffer, {
@@ -211,14 +237,23 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   console.log(`${logPrefix} Measured LUFS:`, measuredLufs.toFixed(1));
 
   // 7. Normalize to target LUFS (if enabled)
-  if (settings.normalizeLoudness && settings.targetLufs) {
-    console.log(`${logPrefix} Normalizing to target LUFS:`, settings.targetLufs);
-    // Apply gain only; final peak control happens in the clipper/limiter stages below.
-    renderedBuffer = normalizeToLUFS(renderedBuffer, settings.targetLufs, 0, { skipLimiter: true });
+  if (settings.normalizeLoudness && targetLufs) {
+    console.log(`${logPrefix} Normalizing to target LUFS:`, targetLufs);
+    if (artifactSafeMode) {
+      const currentPeakDB = findTruePeak(renderedBuffer);
+      const desiredGainDB = Number.isFinite(measuredLufs) ? targetLufs - measuredLufs : 0;
+      const peakSafeGainDB = (settings.truePeakCeiling || -1) - 0.3 - currentPeakDB;
+      const gainDB = Math.min(desiredGainDB, peakSafeGainDB);
+      console.log(`${logPrefix} Artifact-safe gain:`, gainDB.toFixed(2), 'dB');
+      renderedBuffer = applyGain(renderedBuffer, gainDB);
+    } else {
+      // Apply gain only; final peak control happens in the clipper/limiter stages below.
+      renderedBuffer = normalizeToLUFS(renderedBuffer, targetLufs, 0, { skipLimiter: true });
+    }
   }
   if (onProgress) onProgress(0.75);
 
-  if (settings.truePeakLimit && settings.aiEnhance !== false) {
+  if (settings.truePeakLimit && settings.aiEnhance !== false && !artifactSafeMode) {
     console.log(`${logPrefix} Applying limiter stress guard...`);
     const limiterCharacter = settings.limiterCharacter || 'balanced';
     const guardAmount = limiterCharacter === 'transparent' ? 0.65
@@ -227,7 +262,7 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
           : 0.85;
     const guarded = applyLimiterStressGuard(renderedBuffer, {
       amount: guardAmount,
-      targetLufs: settings.targetLufs ?? -12,
+      targetLufs: targetLufs ?? -12,
       intensity: settings.aiIntensity ?? 1
     });
     renderedBuffer = guarded.buffer;
@@ -237,7 +272,7 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   }
 
   // 8. Soft Clipper (reduces peak-to-loudness ratio before limiting)
-  if (settings.truePeakLimit) {
+  if (settings.truePeakLimit && !artifactSafeMode) {
     const ceiling = settings.truePeakCeiling || -1;
     console.log(`${logPrefix} Applying mastering soft clip (ceiling:`, ceiling, 'dB)...');
     const limiterCharacter = settings.limiterCharacter || 'balanced';
@@ -245,11 +280,14 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
       : limiterCharacter === 'punch' ? 1.05
         : limiterCharacter === 'dense' ? 1.2
           : 1.0;
+    const artifactSafeScale = settings.isLossySource || (settings.artifactProtection ?? 0) >= 0.78
+      ? 0.72
+      : 1;
     renderedBuffer = applyMasteringSoftClip(renderedBuffer, {
       ceiling: ceiling,
       lookaheadMs: 0.5,
       releaseMs: 10,
-      drive: (aiProfile.softClipDrive ?? 1.5) * Math.sqrt(settings.aiIntensity ?? 1) * limiterDriveScale
+      drive: (aiProfile.softClipDrive ?? 1.5) * Math.sqrt(settings.aiIntensity ?? 1) * limiterDriveScale * artifactSafeScale
     }, (p) => {
       if (onProgress) onProgress(0.75 + p * 0.15);
     });
@@ -257,18 +295,18 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   if (onProgress) onProgress(0.90);
 
   // 9. True Peak Limiting - final safety clip (if enabled)
-  if (settings.truePeakLimit) {
+  if (settings.truePeakLimit && !artifactSafeMode) {
     const ceiling = settings.truePeakCeiling || -1;
     const ceilingLinear = Math.pow(10, ceiling / 20);
     console.log(`${logPrefix} Applying true peak limiter (ceiling:`, ceiling, 'dB)...');
     renderedBuffer = applyLookaheadLimiter(renderedBuffer, ceilingLinear);
   }
 
-  if (settings.normalizeLoudness && settings.targetLufs && settings.truePeakLimit) {
+  if (settings.normalizeLoudness && targetLufs && settings.truePeakLimit && !artifactSafeMode) {
     const ceiling = settings.truePeakCeiling || -1;
     console.log(`${logPrefix} Final loudness/peak calibration...`);
     const calibrated = finalizeMasteringTarget(renderedBuffer, {
-      targetLufs: settings.targetLufs,
+      targetLufs,
       ceilingDB: ceiling,
       toleranceDB: 0.15,
       maxLimiterPushDB: (aiProfile.maxLimiterPushDB ?? 1.2) * Math.sqrt(settings.aiIntensity ?? 1) * (
@@ -276,7 +314,7 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
           : settings.limiterCharacter === 'punch' ? 1.05
             : settings.limiterCharacter === 'dense' ? 1.25
               : 1.0
-      )
+      ) * (artifactSafeMode ? 0.25 : 1)
     });
     renderedBuffer = calibrated.buffer;
   }
@@ -468,7 +506,10 @@ export async function renderToAudioBuffer(sourceBuffer, settings, mode = 'previe
       renderedBuffer = applyTapeWarmth(renderedBuffer, null);
     }
     if (settings.addPunch) {
-      renderedBuffer = applyMultibandTransient(renderedBuffer, null);
+      const transientAmount = settings.isLossySource || (settings.artifactProtection ?? 0) >= 0.78
+        ? 0.45
+        : 1;
+      renderedBuffer = applyMultibandTransient(renderedBuffer, null, { amount: transientAmount });
     }
 
     const lufs = measureLUFS(renderedBuffer);

@@ -7,6 +7,7 @@ import {
   findTruePeak,
   applyLookaheadLimiter,
   normalizeToLUFS,
+  applyGain,
   analyzeAIGeneratedMastering,
   chooseAIMasteringProfile,
   getAIMasteringRecommendation,
@@ -652,21 +653,31 @@ function applyLiveChainParams() {
   applyPreviewApproximation();
 
   // Glue Compression
-  if (glueCompression.checked && !playerState.isBypassed) {
-    audioNodes.compressor.threshold.value = -18;
-    audioNodes.compressor.ratio.value = 3;
+  const artifactSafeMode = /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentFile?.name || '') ||
+    Number(artifactProtection?.value || 0) >= 78 ||
+    Number(sibilanceProtection?.value || 0) >= 75;
+  if (glueCompression.checked && !playerState.isBypassed && !artifactSafeMode) {
+    audioNodes.compressor.threshold.value = -14;
+    audioNodes.compressor.knee.value = 24;
+    audioNodes.compressor.ratio.value = 1.45;
+    audioNodes.compressor.attack.value = 0.03;
+    audioNodes.compressor.release.value = 0.22;
   } else {
     audioNodes.compressor.threshold.value = 0;
+    audioNodes.compressor.knee.value = 0;
     audioNodes.compressor.ratio.value = 1;
   }
 
   // Limiter
-  if (truePeakLimit.checked && !playerState.isBypassed) {
+  if (truePeakLimit.checked && !playerState.isBypassed && !artifactSafeMode) {
     audioNodes.limiter.threshold.value = ceilingValueDb;
-    audioNodes.limiter.ratio.value = 20;
-    audioNodes.limiter.attack.value = 0.001;
+    audioNodes.limiter.knee.value = 6;
+    audioNodes.limiter.ratio.value = 12;
+    audioNodes.limiter.attack.value = 0.003;
+    audioNodes.limiter.release.value = 0.12;
   } else {
     audioNodes.limiter.threshold.value = 0;
+    audioNodes.limiter.knee.value = 0;
     audioNodes.limiter.ratio.value = 1;
   }
 }
@@ -697,6 +708,13 @@ function applyPreviewApproximation() {
 
   try {
     const settings = getCurrentSettings();
+    const transparentSafeMode = settings.isLossySource ||
+      (settings.artifactProtection ?? 0) >= 0.78 ||
+      (settings.sibilanceProtection ?? 0) >= 0.75;
+    if (transparentSafeMode) {
+      reset();
+      return;
+    }
     const analysis = fileState.aiAnalysis || analyzeAIGeneratedMastering(fileState.originalBuffer);
     fileState.aiAnalysis = analysis;
     const profile = chooseAIMasteringProfile(analysis, settings.aiProfile || 'auto');
@@ -706,18 +724,27 @@ function applyPreviewApproximation() {
       profile,
       {
         sibilanceProtection: settings.sibilanceProtection ?? 0.6,
-        artifactProtection: settings.artifactProtection ?? 0.7
+        artifactProtection: settings.artifactProtection ?? 0.7,
+        isLossySource: settings.isLossySource
       }
     );
 
     const previewScale = 0.55;
     audioNodes.previewBass.gain.value = moves.bassLift * previewScale;
     audioNodes.previewMud.gain.value = moves.mudCut * previewScale;
-    audioNodes.previewPresence.gain.value = moves.presenceCut * previewScale;
-    audioNodes.previewSibilance.gain.value = moves.sibilanceCut * previewScale;
-    audioNodes.previewHarsh.gain.value = moves.harshCut * previewScale;
-    audioNodes.previewMetallic.gain.value = moves.metallicCut * previewScale;
-    audioNodes.previewAir.gain.value = moves.airShelf * previewScale;
+    if (transparentSafeMode) {
+      audioNodes.previewPresence.gain.value = 0;
+      audioNodes.previewSibilance.gain.value = 0;
+      audioNodes.previewHarsh.gain.value = 0;
+      audioNodes.previewMetallic.gain.value = 0;
+      audioNodes.previewAir.gain.value = Math.max(-2, Math.min(0, moves.airShelf + moves.sibilanceCut * 0.18 + moves.metallicCut * 0.16)) * previewScale;
+    } else {
+      audioNodes.previewPresence.gain.value = moves.presenceCut * previewScale;
+      audioNodes.previewSibilance.gain.value = moves.sibilanceCut * previewScale;
+      audioNodes.previewHarsh.gain.value = moves.harshCut * previewScale;
+      audioNodes.previewMetallic.gain.value = moves.metallicCut * previewScale;
+      audioNodes.previewAir.gain.value = moves.airShelf * previewScale;
+    }
 
     if (settings.referenceMatch && settings.referenceAnalysis) {
       const refSource = analysis.profile;
@@ -795,8 +822,18 @@ function connectDirectToOutput(source) {
   }
 }
 
+function isCurrentArtifactSafeSource() {
+  return /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentFile?.name || '') ||
+    Number(artifactProtection?.value || 0) >= 78 ||
+    Number(sibilanceProtection?.value || 0) >= 75;
+}
+
 function switchToLivePreview() {
   if (!playerState.isPlaying || playerState.isBypassed || !audioNodes.context || !fileState.originalBuffer) {
+    return;
+  }
+
+  if (isCurrentArtifactSafeSource()) {
     return;
   }
 
@@ -1299,8 +1336,17 @@ async function loadAudioFile(file) {
       isLossy: /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(file.name)
     }, { force: true });
 
-    // Normalize to target LUFS using pure JavaScript
-    const normalizedBuffer = normalizeToLUFS(decodedBuffer, targetLufsDb);
+    const isLossySource = /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(file.name);
+    const normalizedTarget = isLossySource ? Math.min(targetLufsDb, -14.5) : targetLufsDb;
+    let normalizedBuffer;
+    if (isLossySource) {
+      const desiredGainDB = Number.isFinite(originalLufs) ? normalizedTarget - originalLufs : 0;
+      const peakSafeGainDB = -1.8 - originalTruePeak;
+      normalizedBuffer = applyGain(decodedBuffer, Math.min(desiredGainDB, peakSafeGainDB));
+    } else {
+      // Normalize to target LUFS using pure JavaScript
+      normalizedBuffer = normalizeToLUFS(decodedBuffer, normalizedTarget);
+    }
 
     showLoadingModal('Applying normalization...', 70);
 
@@ -1311,7 +1357,7 @@ async function loadAudioFile(file) {
 
     // Store normalized buffer
     fileState.normalizedBuffer = normalizedBuffer;
-    fileState.normalizedTargetLufs = targetLufsDb;
+    fileState.normalizedTargetLufs = normalizedTarget;
 
     // Apply effects (denoise, exciter) if enabled
     await processEffects();
@@ -1381,6 +1427,11 @@ function playAudio() {
 
     useDirectOutput = true; // Skip effects chain entirely
   } else {
+    if (isCurrentArtifactSafeSource()) {
+      playbackBuffer = fileState.cachedRenderBuffer || fileState.originalBuffer;
+      useDirectOutput = true;
+      console.log('[Playback] FX ON - artifact-safe direct preview');
+    } else
     // FX ON: use the live chain immediately while a new rendered preview is catching up.
     if (fileState.forceLivePreview) {
       playbackBuffer = fileState.normalizedBuffer || fileState.originalBuffer || audioNodes.buffer;
@@ -1516,7 +1567,10 @@ function seekTo(time) {
       }
       useDirectOutput = true;
     } else {
-      if (fileState.forceLivePreview) {
+      if (isCurrentArtifactSafeSource()) {
+        playbackBuffer = fileState.cachedRenderBuffer || fileState.originalBuffer;
+        useDirectOutput = true;
+      } else if (fileState.forceLivePreview) {
         playbackBuffer = fileState.normalizedBuffer || fileState.originalBuffer || audioNodes.buffer;
         useDirectOutput = false;
       } else if (fileState.cachedRenderBuffer) {
@@ -1651,6 +1705,7 @@ async function clearCurrentSession({ toast = true } = {}) {
   resetSpectrogramView();
 
   currentFile = null;
+  window.__currentAudioFileName = '';
   fileInput.value = '';
   fileState.selectedFilePath = null;
   fileState.originalBuffer = null;
@@ -1729,6 +1784,7 @@ async function loadFile(file) {
 
     // Store file reference for browser
     currentFile = file;
+    window.__currentAudioFileName = file.name || '';
     fileState.selectedFilePath = file.name;
 
     // Load into Web Audio first to get metadata
@@ -2588,9 +2644,14 @@ function refineModeDefaultsForCurrentSource(defaults) {
 
   if (isLossy) {
     refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
-    refined.sibilanceProtection = Math.max(refined.sibilanceProtection ?? 65, 70);
-    refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 75);
+    refined.sibilanceProtection = Math.max(refined.sibilanceProtection ?? 65, 75);
+    refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 80);
+    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -14.5);
+    refined.limiterCharacter = 'transparent';
     refined.addAir = false;
+    refined.addPunch = false;
+    refined.tapeWarmth = false;
+    refined.glueCompression = false;
   }
 
   if (!analysis) return refined;
@@ -2609,17 +2670,25 @@ function refineModeDefaultsForCurrentSource(defaults) {
     codecStress < 0.28;
   const muddyOrVeiled = (profile.mudDB ?? -18) > -7.5 ||
     ((profile.airDB ?? -18) < -23 && (profile.presenceToBodyDB ?? 0) < -8 && (profile.harshDB ?? -18) < -12);
+  const percussiveArtifactRisk = isLossy ||
+    codecStress > 0.32 ||
+    (profile.metallicDB ?? -18) > -14.5 ||
+    (profile.harshDB ?? -18) > -11.5;
 
   if (clippedOrPinned || limiterRisk > 0.55 || (peaks.loudestCrestDB ?? 12) < 6.5) {
     refined.inputGain = Math.min(refined.inputGain ?? -3.5, -5.5);
     refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
-    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -13.5);
+    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -14.5);
     refined.limiterCharacter = 'transparent';
     refined.addPunch = false;
+    refined.tapeWarmth = false;
+    refined.glueCompression = false;
   } else if (limiterRisk > 0.38 || codecStress > 0.45) {
     refined.inputGain = Math.min(refined.inputGain ?? -3.5, -5);
     refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
     refined.targetLufs = Math.min(refined.targetLufs ?? -12, -12.5);
+    refined.limiterCharacter = 'transparent';
+    refined.glueCompression = false;
   }
 
   if (codecStress > 0.42) {
@@ -2628,9 +2697,25 @@ function refineModeDefaultsForCurrentSource(defaults) {
     refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 85);
     refined.limiterCharacter = 'transparent';
     refined.addAir = false;
+    refined.addPunch = false;
+    refined.tapeWarmth = false;
+    refined.glueCompression = false;
   }
 
-  if (darkButSafe && !isLowBitrate) {
+  if (percussiveArtifactRisk) {
+    refined.aiIntensity = Math.min(refined.aiIntensity ?? 100, 100);
+    refined.sibilanceProtection = Math.max(refined.sibilanceProtection ?? 65, 78);
+    refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 82);
+    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -14.5);
+    refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
+    refined.limiterCharacter = 'transparent';
+    refined.addAir = false;
+    refined.addPunch = false;
+    refined.tapeWarmth = false;
+    refined.glueCompression = false;
+  }
+
+  if (darkButSafe && !isLossy && !isLowBitrate) {
     refined.aiProfile = refined.aiProfile === 'auto' ? 'clarity' : refined.aiProfile;
     refined.addAir = true;
     refined.artifactProtection = Math.min(refined.artifactProtection ?? 75, 75);
@@ -3118,8 +3203,25 @@ async function renormalizeAudio(newTargetLufs) {
     // bypass and live fallback close to the selected target.
     await new Promise(resolve => setTimeout(resolve, 0));
 
-    // Re-normalize to new target
-    const normalizedBuffer = normalizeToLUFS(fileState.originalBuffer, newTargetLufs);
+    // Re-normalize to new target. Lossy/piano-risk sources use peak-safe gain only;
+    // limiter-based loudness normalization can create the metallic piano artifacts.
+    let normalizedBuffer;
+    const lossySource = isCurrentArtifactSafeSource();
+    if (lossySource) {
+      const currentLufs = Number.isFinite(fileState.originalLufs)
+        ? fileState.originalLufs
+        : measureLUFS(fileState.originalBuffer);
+      const currentPeak = Number.isFinite(fileState.originalTruePeak)
+        ? fileState.originalTruePeak
+        : findTruePeak(fileState.originalBuffer);
+      const safeTarget = Math.min(newTargetLufs, -14.5);
+      const desiredGainDB = Number.isFinite(currentLufs) ? safeTarget - currentLufs : 0;
+      const peakSafeGainDB = -1.8 - currentPeak;
+      normalizedBuffer = applyGain(fileState.originalBuffer, Math.min(desiredGainDB, peakSafeGainDB));
+      newTargetLufs = safeTarget;
+    } else {
+      normalizedBuffer = normalizeToLUFS(fileState.originalBuffer, newTargetLufs);
+    }
 
     // Update normalized buffer
     fileState.normalizedBuffer = normalizedBuffer;

@@ -33,6 +33,7 @@ import {
   applyReferenceMatch,
   applyLimiterStressGuard,
   applyStereoStabilityGuard,
+  applyPianoHighArtifactSuppressor,
   finalizeMasteringTarget
 } from '../lib/dsp/index.js';
 
@@ -1495,6 +1496,12 @@ self.onmessage = async (e) => {
 
         // Track level through the chain
         console.log(`[Worker Chain] Starting render (Mode: ${mode})`);
+        const artifactSafeMode = settings.isLossySource ||
+          (settings.artifactProtection ?? 0) >= 0.78 ||
+          (settings.sibilanceProtection ?? 0) >= 0.75;
+        const safeTargetLufs = artifactSafeMode
+          ? Math.min(settings.targetLufs ?? -14, -14.5)
+          : settings.targetLufs;
 
         // --- HEAVY FX (Shared) ---
 
@@ -1528,19 +1535,20 @@ self.onmessage = async (e) => {
           maxLimiterPushDB: 1.2
         };
 
-        if (settings.deharsh) {
+        if (settings.deharsh && !artifactSafeMode) {
           sendProgress(id, 0.15, 'Applying hybrid dynamic processor...');
           buffer = processHybridDynamic(buffer, 'mastering');
         }
 
         // 1.5 AI-generated / lossy-source repair
-        if (settings.aiEnhance !== false) {
+        if (settings.aiEnhance !== false && !artifactSafeMode) {
           sendProgress(id, 0.22, 'Repairing AI/MP3 artifacts...');
           const repaired = applyAIGeneratedMasteringRepair(buffer, {
             profile: settings.aiProfile || 'auto',
             intensity: settings.aiIntensity ?? 1,
             sibilanceProtection: settings.sibilanceProtection ?? 0.6,
             artifactProtection: settings.artifactProtection ?? 0.7,
+            isLossySource: settings.isLossySource,
             cleanLowEnd: settings.cleanLowEnd
           });
           buffer = repaired.buffer;
@@ -1550,7 +1558,7 @@ self.onmessage = async (e) => {
           }
         }
 
-        if (settings.autoLevel) {
+        if (settings.autoLevel && !artifactSafeMode) {
           sendProgress(id, 0.26, 'Applying auto level...');
           const leveledChannels = applyDynamicLevelingToChannels(
             Array.from({ length: buffer.numberOfChannels }, (_, ch) => buffer.getChannelData(ch)),
@@ -1584,10 +1592,18 @@ self.onmessage = async (e) => {
         // 4. Multiband Transient / Add Punch (if enabled)
         if (settings.addPunch) {
           sendProgress(id, 0.55, 'Applying multiband transient...');
-          buffer = applyMultibandTransient(buffer);
+          const transientAmount = settings.isLossySource || (settings.artifactProtection ?? 0) >= 0.78
+            ? 0.45
+            : 1;
+          buffer = applyMultibandTransient(buffer, undefined, { amount: transientAmount });
         }
 
-        if (settings.referenceMatch && settings.referenceAnalysis) {
+        if (artifactSafeMode) {
+          sendProgress(id, 0.56, 'Suppressing high-note piano artifacts...');
+          buffer = applyPianoHighArtifactSuppressor(buffer, { amount: 0.7 });
+        }
+
+        if (settings.referenceMatch && settings.referenceAnalysis && !artifactSafeMode) {
           sendProgress(id, 0.58, 'Matching reference...');
           const matched = applyReferenceMatch(buffer, settings.referenceAnalysis, {
             amount: settings.referenceAmount ?? 0.65
@@ -1598,7 +1614,7 @@ self.onmessage = async (e) => {
           }
         }
 
-        if (buffer.numberOfChannels === 2 && settings.aiEnhance !== false) {
+        if (buffer.numberOfChannels === 2 && settings.aiEnhance !== false && !artifactSafeMode) {
           sendProgress(id, 0.59, 'Stabilizing stereo image...');
           const stereoGuarded = applyStereoStabilityGuard(buffer, {
             amount: settings.aiIntensity ?? 1
@@ -1639,7 +1655,7 @@ self.onmessage = async (e) => {
         // 5. Final Filters (HPF 30Hz / adaptive air cleanup)
         // HPF is controlled by Clean Low End; LPF opens up on clean or already dark sources.
         sendProgress(id, 0.60, 'Applying final filters...');
-        const finalFilterAnalysis = settings.aiEnhance !== false ? analyzeAIGeneratedMastering(buffer) : null;
+        const finalFilterAnalysis = settings.aiEnhance !== false && !artifactSafeMode ? analyzeAIGeneratedMastering(buffer) : null;
         const finalFilterOptions = getAdaptiveFinalFilterOptions(finalFilterAnalysis, settings);
         buffer = applyFinalFilters(buffer, {
           highpass: false,
@@ -1647,24 +1663,26 @@ self.onmessage = async (e) => {
         });
 
         // 6. EQ (5-Band) + Cut Mud
-        sendProgress(id, 0.65, 'Applying EQ...');
-        buffer = applyParametricEQ(buffer, settings);
+        if (!artifactSafeMode) {
+          sendProgress(id, 0.65, 'Applying EQ...');
+          buffer = applyParametricEQ(buffer, settings);
+        }
 
         // 7. Glue Compressor
-        if (settings.glueCompression) {
+        if (settings.glueCompression && !artifactSafeMode) {
           sendProgress(id, 0.70, 'Applying glue compressor...');
           buffer = applyGlueCompressor(buffer, {
-            threshold: -18,
-            ratio: 3,
-            attack: 0.02,
-            release: 0.25,
-            knee: 10
+            threshold: -14,
+            ratio: 1.45,
+            attack: 0.03,
+            release: 0.22,
+            knee: 24
           });
         }
 
         // 7.5 Stereo processing (Width + Center Bass)
         // Mirrors the WebAudio M/S width stage used in the app's live chain.
-        if (buffer.numberOfChannels === 2) {
+        if (buffer.numberOfChannels === 2 && !artifactSafeMode) {
           const stereoWidthValue = Number(settings.stereoWidth);
           const width = Number.isFinite(stereoWidthValue) ? stereoWidthValue / 100 : 1.0;
           const profileWidth = aiProfile.stereoWidthScale ?? 1;
@@ -1686,14 +1704,30 @@ self.onmessage = async (e) => {
         }
 
         // 8. Normalize & Limit (Corrected Order)
-        if (settings.normalizeLoudness && settings.targetLufs) {
+        if (settings.normalizeLoudness && safeTargetLufs) {
           sendProgress(id, 0.75, 'Analyzing loudness...');
-          const targetLufs = settings.targetLufs;
-          // Apply Gain (No Limiting yet, skipLimiter: true)
-          buffer = normalizeToLUFS(buffer, targetLufs, 0, { skipLimiter: true });
+          if (artifactSafeMode) {
+            const currentLufs = measureLUFS(buffer);
+            const currentPeakDB = findTruePeakFromChannels(
+              Array.from({ length: buffer.numberOfChannels }, (_, ch) => buffer.getChannelData(ch))
+            );
+            const desiredGainDB = Number.isFinite(currentLufs) ? safeTargetLufs - currentLufs : 0;
+            const peakSafeGainDB = (settings.truePeakCeiling || -1) - 0.3 - currentPeakDB;
+            const gainDB = Math.min(desiredGainDB, peakSafeGainDB);
+            const gainLin = Math.pow(10, gainDB / 20);
+            for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+              const data = buffer.getChannelData(ch);
+              for (let i = 0; i < data.length; i++) {
+                data[i] *= gainLin;
+              }
+            }
+          } else {
+            // Apply Gain (No Limiting yet, skipLimiter: true)
+            buffer = normalizeToLUFS(buffer, safeTargetLufs, 0, { skipLimiter: true });
+          }
         }
 
-        if (settings.truePeakLimit && settings.aiEnhance !== false) {
+        if (settings.truePeakLimit && settings.aiEnhance !== false && !artifactSafeMode) {
           sendProgress(id, 0.82, 'Protecting limiter clarity...');
           const limiterCharacter = settings.limiterCharacter || 'balanced';
           const guardAmount = limiterCharacter === 'transparent' ? 0.65
@@ -1702,7 +1736,7 @@ self.onmessage = async (e) => {
                 : 0.85;
           const guarded = applyLimiterStressGuard(buffer, {
             amount: guardAmount,
-            targetLufs: settings.targetLufs ?? -12,
+            targetLufs: safeTargetLufs ?? -12,
             intensity: settings.aiIntensity ?? 1
           });
           buffer = guarded.buffer;
@@ -1712,7 +1746,7 @@ self.onmessage = async (e) => {
         }
 
         // 9. Soft Clipper
-        if (settings.truePeakLimit) {
+        if (settings.truePeakLimit && !artifactSafeMode) {
           sendProgress(id, 0.85, 'Applying soft clipper...');
           const ceiling = settings.truePeakCeiling || -1;
           const limiterCharacter = settings.limiterCharacter || 'balanced';
@@ -1720,16 +1754,19 @@ self.onmessage = async (e) => {
             : limiterCharacter === 'punch' ? 1.05
               : limiterCharacter === 'dense' ? 1.2
                 : 1.0;
+          const artifactSafeScale = settings.isLossySource || (settings.artifactProtection ?? 0) >= 0.78
+            ? 0.72
+            : 1;
           buffer = applyMasteringSoftClip(buffer, {
             ceiling: ceiling,
             lookaheadMs: 0.5,
             releaseMs: 10,
-            drive: (aiProfile.softClipDrive ?? 1.5) * Math.sqrt(settings.aiIntensity ?? 1) * limiterDriveScale
+            drive: (aiProfile.softClipDrive ?? 1.5) * Math.sqrt(settings.aiIntensity ?? 1) * limiterDriveScale * artifactSafeScale
           });
         }
 
         // 10. Final True Peak Limiter
-        if (settings.truePeakLimit) {
+        if (settings.truePeakLimit && !artifactSafeMode) {
           sendProgress(id, 0.95, 'Applying final limiter...');
           const ceiling = settings.truePeakCeiling || -1;
           const ceilingLinear = Math.pow(10, ceiling / 20);
@@ -1755,10 +1792,10 @@ self.onmessage = async (e) => {
           }
         }
 
-        if (settings.normalizeLoudness && settings.targetLufs && settings.truePeakLimit) {
+        if (settings.normalizeLoudness && safeTargetLufs && settings.truePeakLimit && !artifactSafeMode) {
           sendProgress(id, 0.98, 'Calibrating final loudness...');
           const calibrated = finalizeMasteringTarget(buffer, {
-            targetLufs: settings.targetLufs,
+            targetLufs: safeTargetLufs,
             ceilingDB: settings.truePeakCeiling || -1,
             toleranceDB: 0.15,
             maxLimiterPushDB: (aiProfile.maxLimiterPushDB ?? 1.2) * Math.sqrt(settings.aiIntensity ?? 1) * (
@@ -1766,7 +1803,7 @@ self.onmessage = async (e) => {
                 : settings.limiterCharacter === 'punch' ? 1.05
                   : settings.limiterCharacter === 'dense' ? 1.25
                     : 1.0
-            )
+            ) * (artifactSafeMode ? 0.25 : 1)
           });
           buffer = calibrated.buffer;
         }

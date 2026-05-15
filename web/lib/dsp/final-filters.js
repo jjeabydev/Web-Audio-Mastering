@@ -138,11 +138,26 @@ export function getAdaptiveFinalFilterOptions(analysis, settings = {}) {
   const harshDB = profile.harshDB ?? -18;
   const metallicDB = profile.metallicDB ?? -18;
   const airDB = profile.airDB ?? -18;
-  const fragileHighs = codecStress > 0.45 || limiterRisk > 0.55 || harshDB > -11.5 || metallicDB > -13.5;
+  const lossySource = Boolean(settings.isLossySource);
+  const artifactProtection = settings.artifactProtection ?? 0.7;
+  const sibilanceProtection = settings.sibilanceProtection ?? 0.65;
+  const fragileHighs = lossySource ||
+    codecStress > 0.36 ||
+    limiterRisk > 0.50 ||
+    harshDB > -12.5 ||
+    metallicDB > -14.5 ||
+    artifactProtection >= 0.78 ||
+    sibilanceProtection >= 0.74;
   const airDeficit = airDB < -23 && harshDB < -13 && metallicDB < -15;
 
   if (fragileHighs) {
-    return { lowpass: true, lowpassFreq: 18000 };
+    const highArtifactRepair = artifactProtection >= 0.82 || sibilanceProtection >= 0.78;
+    const lowpassFreq = lossySource && highArtifactRepair
+      ? 15000
+      : lossySource || metallicDB > -13.5 || codecStress > 0.45
+      ? 16500
+      : 18000;
+    return { lowpass: true, lowpassFreq };
   }
 
   if (airDeficit || settings.addAir) {

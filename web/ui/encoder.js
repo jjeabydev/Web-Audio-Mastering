@@ -380,25 +380,30 @@ export function createOfflineNodes(offlineCtx, settings) {
   nodes.midPeak.Q.value = 2;
   nodes.midPeak.gain.value = 0; // Harshness taming handled by deharsh dynamic processor
 
-  if (settings.glueCompression) {
-    nodes.compressor.threshold.value = -18;
-    nodes.compressor.knee.value = 10;
-    nodes.compressor.ratio.value = 3;
-    nodes.compressor.attack.value = 0.02;
-    nodes.compressor.release.value = 0.25;
+  const artifactSafeMode = settings.isLossySource ||
+    (settings.artifactProtection ?? 0) >= 0.78 ||
+    (settings.sibilanceProtection ?? 0) >= 0.75;
+  if (settings.glueCompression && !artifactSafeMode) {
+    nodes.compressor.threshold.value = -14;
+    nodes.compressor.knee.value = 24;
+    nodes.compressor.ratio.value = 1.45;
+    nodes.compressor.attack.value = 0.03;
+    nodes.compressor.release.value = 0.22;
   } else {
     nodes.compressor.threshold.value = 0;
+    nodes.compressor.knee.value = 0;
     nodes.compressor.ratio.value = 1;
   }
 
-  if (settings.truePeakLimit) {
+  if (settings.truePeakLimit && !artifactSafeMode) {
     nodes.limiter.threshold.value = settings.truePeakCeiling || -1;
-    nodes.limiter.knee.value = 0;
-    nodes.limiter.ratio.value = 20;
-    nodes.limiter.attack.value = 0.001;
-    nodes.limiter.release.value = 0.05;
+    nodes.limiter.knee.value = 6;
+    nodes.limiter.ratio.value = 12;
+    nodes.limiter.attack.value = 0.003;
+    nodes.limiter.release.value = 0.12;
   } else {
     nodes.limiter.threshold.value = 0;
+    nodes.limiter.knee.value = 0;
     nodes.limiter.ratio.value = 1;
   }
 

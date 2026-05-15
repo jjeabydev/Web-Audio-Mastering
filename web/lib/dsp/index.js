@@ -188,5 +188,6 @@ export {
   applyReferenceMatch,
   applyLimiterStressGuard,
   applyStereoStabilityGuard,
+  applyPianoHighArtifactSuppressor,
   finalizeMasteringTarget
 } from './ai-mastering.js';

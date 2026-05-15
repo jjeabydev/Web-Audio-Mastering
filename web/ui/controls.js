@@ -105,6 +105,7 @@ export function getCurrentSettings() {
     referenceAmount: (parseFloat(referenceAmount?.value) || 65) / 100,
     referenceAnalysis,
     addPunch: addPunch.checked,
+    isLossySource: /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(window.__currentAudioFileName || ''),
     inputGain: inputGainValue,
     eqLow: eqValues.low,
     eqLowMid: eqValues.lowMid,

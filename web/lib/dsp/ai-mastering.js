@@ -47,7 +47,7 @@ export const AI_MASTERING_PROFILES = {
     softClipDrive: 1.3,
     stereoWidthScale: 1.05,
     bassMonoFreq: 190,
-    tone: { bass: -0.25, mud: -0.55, presence: 0.25, harsh: -0.45, air: 0.45 },
+    tone: { bass: -0.25, mud: -0.55, presence: 0.1, harsh: -0.5, air: 0.15 },
     description: 'Cleaner high detail with mud and sibilance controlled'
   },
   tape: {
@@ -656,8 +656,9 @@ export function getAIGeneratedMasteringMoves(analysis, strength = 1, profile = A
   const tone = profile.tone || {};
   const sibilanceAmount = clamp(options.sibilanceProtection ?? 0.6, 0, 1);
   const artifactAmount = clamp(options.artifactProtection ?? 0.7, 0, 1);
+  const lossyProtected = Boolean(options.isLossySource) || artifactAmount >= 0.78 || sibilanceAmount >= 0.75;
   const lowCutFreq = clamp(30 + Math.max(0, subToBassDB + 1) * 4, 30, 42);
-  const fragileHighs = (analysis.codecStress ?? 0) > 0.45 || harshDB > -11.5 || metallicDB > -13.5;
+  const fragileHighs = lossyProtected || (analysis.codecStress ?? 0) > 0.45 || harshDB > -11.5 || metallicDB > -13.5;
   const muffleRisk = clamp(
     Math.max(0, -23 - airDB) * 0.12 +
     Math.max(0, -2.5 - presenceToBodyDB) * 0.18 +
@@ -667,20 +668,22 @@ export function getAIGeneratedMasteringMoves(analysis, strength = 1, profile = A
   );
   const mudCut = clamp((-clamp((mudDB + 10) * 0.35, 0, 2.8) + (tone.mud || 0)) * strength, -3.2, 0.6);
   const presenceLift = fragileHighs ? 0 : muffleRisk * 0.55;
-  const presenceCut = clamp((-clamp((presenceToBodyDB + 1.5) * 0.4, 0, 2.2) + (tone.presence || 0) + presenceLift) * strength, -2.8, 1.2);
-  const sibilanceRisk = clamp((harshDB + 15) * 0.28 + Math.max(0, metallicDB + 17) * 0.08, 0, 3.1);
+  const presenceTone = lossyProtected ? Math.min(0, tone.presence || 0) : (tone.presence || 0);
+  const presenceCut = clamp((-clamp((presenceToBodyDB + 1.5) * 0.4, 0, 2.2) + presenceTone + presenceLift) * strength, -3.2, lossyProtected ? 0 : 1.2);
+  const sibilanceRisk = clamp((harshDB + 15) * 0.28 + Math.max(0, metallicDB + 17) * 0.08 + (lossyProtected ? 0.18 : 0), 0, 3.3);
   const sibilanceCut = -clamp(sibilanceRisk * (0.45 + sibilanceAmount * 0.75) * strength, 0, 3.4);
-  const harshRisk = clamp((harshDB + 13) * 0.55, 0, 3.5);
+  const harshRisk = clamp((harshDB + 13) * 0.55 + (lossyProtected ? 0.12 : 0), 0, 3.7);
   const harshCut = Math.min(0, clamp((-(harshRisk) + (tone.harsh || 0) + sibilanceCut * 0.35) * strength, -4.8, 0));
-  const metallicExcess = clamp((metallicDB + 17) * 0.18 + Math.max(0, harshDB + 13) * 0.05 + (analysis.codecStress ?? 0) * 0.75, 0, 2.5);
+  const metallicExcess = clamp((metallicDB + 17) * 0.18 + Math.max(0, harshDB + 13) * 0.05 + (analysis.codecStress ?? 0) * 0.75 + (lossyProtected ? 0.35 : 0), 0, 2.9);
   const metallicBase = clamp(
     metallicExcess * (0.45 + artifactAmount * 0.95),
     0,
-    3.2
+    lossyProtected ? 3.8 : 3.2
   );
-  const metallicCut = -clamp(metallicBase * strength, 0, 4.2);
+  const metallicCut = -clamp(metallicBase * strength, 0, lossyProtected ? 5.0 : 4.2);
   const opennessLift = fragileHighs ? 0 : muffleRisk * 0.75;
-  const airShelf = clamp((clamp((-18 - airDB) * 0.16, -1.2, 1.2) + (tone.air || 0) + metallicCut * 0.08 + opennessLift) * strength, -1.8, 1.7);
+  const airTone = lossyProtected ? Math.min(0, tone.air || 0) : (tone.air || 0);
+  const airShelf = clamp((clamp((-18 - airDB) * 0.16, -1.2, 1.2) + airTone + metallicCut * 0.08 + opennessLift) * strength, lossyProtected ? -2.4 : -1.8, lossyProtected ? 0 : 1.7);
   const bassDeficit = clamp((-3 - bassToBodyDB) * 0.18, 0, 1.1);
   const lowHeadroomRisk = clamp((analysis.limiterRisk ?? 0) + Math.max(0, subToBassDB + 1) * 0.1, 0, 1);
   const bassLift = clamp((bassDeficit * (1 - lowHeadroomRisk * 0.55) + (tone.bass || 0)) * strength, -0.8, 1.8);
@@ -702,6 +705,9 @@ export function applyAIGeneratedMasteringRepair(buffer, options = {}) {
   const profile = chooseAIMasteringProfile(analysis, options.profile || 'auto');
   const intensity = clamp(options.intensity ?? 1, 0.25, 1.75);
   const strength = clamp((options.strength ?? profile.repairStrength) * intensity, 0, 1.75);
+  const transparentSafeMode = Boolean(options.isLossySource) ||
+    (options.artifactProtection ?? 0.7) >= 0.78 ||
+    (options.sibilanceProtection ?? 0.6) >= 0.75;
 
   if (strength <= 0) {
     return { buffer, analysis, moves: null, profile };
@@ -709,7 +715,8 @@ export function applyAIGeneratedMasteringRepair(buffer, options = {}) {
 
   const moves = getAIGeneratedMasteringMoves(analysis, strength, profile, {
     sibilanceProtection: options.sibilanceProtection,
-    artifactProtection: options.artifactProtection
+    artifactProtection: options.artifactProtection,
+    isLossySource: options.isLossySource
   });
   let output = buffer;
 
@@ -718,13 +725,18 @@ export function applyAIGeneratedMasteringRepair(buffer, options = {}) {
   }
   output = applyFilterToBuffer(output, 'lowshelf', 95, moves.bassLift, 0.7);
   output = applyFilterToBuffer(output, 'peaking', 280, moves.mudCut, 1.15);
-  output = applyFilterToBuffer(output, 'peaking', 3900, moves.presenceCut, 1.1);
-  output = applyFilterToBuffer(output, 'peaking', 6200, moves.sibilanceCut, 2.3);
-  output = applyFilterToBuffer(output, 'peaking', 9200, moves.sibilanceCut * 0.55, 2.0);
-  output = applyFilterToBuffer(output, 'peaking', 7800, moves.harshCut, 1.6);
-  output = applyFilterToBuffer(output, 'peaking', 10800, moves.metallicCut, 3.2);
-  output = applyFilterToBuffer(output, 'peaking', 11800, moves.metallicCut * 0.45, 2.4);
-  output = applyFilterToBuffer(output, 'highshelf', 12500, moves.airShelf, 0.75);
+  if (transparentSafeMode) {
+    const highShelf = clamp(moves.airShelf + moves.sibilanceCut * 0.18 + moves.metallicCut * 0.16, -2.2, 0);
+    output = applyFilterToBuffer(output, 'highshelf', 9500, highShelf, 0.55);
+  } else {
+    output = applyFilterToBuffer(output, 'peaking', 3900, moves.presenceCut, 1.1);
+    output = applyFilterToBuffer(output, 'peaking', 6200, moves.sibilanceCut, 2.3);
+    output = applyFilterToBuffer(output, 'peaking', 9200, moves.sibilanceCut * 0.55, 2.0);
+    output = applyFilterToBuffer(output, 'peaking', 7800, moves.harshCut, 1.6);
+    output = applyFilterToBuffer(output, 'peaking', 10800, moves.metallicCut, 3.2);
+    output = applyFilterToBuffer(output, 'peaking', 11800, moves.metallicCut * 0.45, 2.4);
+    output = applyFilterToBuffer(output, 'highshelf', 12500, moves.airShelf, 0.75);
+  }
 
   return { buffer: output, analysis, moves, profile };
 }
@@ -893,6 +905,65 @@ export function applyStereoStabilityGuard(buffer, options = {}) {
   };
 }
 
+export function applyPianoHighArtifactSuppressor(buffer, options = {}) {
+  const amount = clamp(options.amount ?? 0.65, 0, 1);
+  if (!buffer || amount <= 0) return buffer;
+
+  const length = buffer.length;
+  const sampleRate = buffer.sampleRate;
+  const output = new AudioBuffer({
+    numberOfChannels: buffer.numberOfChannels,
+    length,
+    sampleRate
+  });
+  const window = Math.max(12, Math.round(sampleRate * 0.00045));
+  const halfWindow = Math.floor(window / 2);
+  const absFloor = 0.012;
+
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const input = buffer.getChannelData(ch);
+    const out = output.getChannelData(ch);
+    out.set(input);
+
+    let localSum = 0;
+    for (let i = 0; i < Math.min(length, window); i++) {
+      localSum += Math.abs(input[i]);
+    }
+
+    for (let i = 3; i < length - 3; i++) {
+      const removeIdx = i - halfWindow - 1;
+      const addIdx = i + halfWindow;
+      if (removeIdx >= 0) localSum -= Math.abs(input[removeIdx]);
+      if (addIdx < length) localSum += Math.abs(input[addIdx]);
+
+      const localAvg = localSum / window;
+      const predicted = (
+        input[i - 3] +
+        input[i - 2] * 2 +
+        input[i - 1] * 3 +
+        input[i + 1] * 3 +
+        input[i + 2] * 2 +
+        input[i + 3]
+      ) / 12;
+      const residual = input[i] - predicted;
+      const edgeJump = Math.min(
+        Math.abs(input[i] - input[i - 1]),
+        Math.abs(input[i] - input[i + 1])
+      );
+      const threshold = Math.max(absFloor, localAvg * 1.25);
+      const isolated = edgeJump > threshold * 0.9;
+
+      if (isolated && Math.abs(residual) > threshold) {
+        const limitedResidual = Math.sign(residual) * threshold;
+        const repaired = predicted + limitedResidual;
+        out[i] = input[i] * (1 - amount) + repaired * amount;
+      }
+    }
+  }
+
+  return output;
+}
+
 export function getAIMasteringRecommendation(analysis, source = {}) {
   const profile = chooseAIMasteringProfile(analysis, 'auto');
   const { harshDB, metallicDB = -18, airDB, mudDB, subToBassDB, presenceToBodyDB = 0 } = analysis.profile;
@@ -907,9 +978,13 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
   const fragileHighs = analysis.codecStress > 0.45 || metallicDB > -13 || harshDB > -11 || lowBitrate || (isLossy && analysis.codecStress > 0.28);
   const limiterRisk = analysis.limiterRisk ?? 0;
 
+  const percussiveArtifactRisk = isLossy || fragileHighs || metallicDB > -14.5 || analysis.codecStress > 0.32;
+
   let targetLufs = -12;
   if (clippedOrPinned || limiterRisk > 0.58 || lowBitrate || peaks.loudestCrestDB < 6.5) {
     targetLufs = -14;
+  } else if (percussiveArtifactRisk) {
+    targetLufs = -14.5;
   } else if ((isLossy && analysis.codecStress > 0.25) || analysis.codecStress > 0.45 || limiterRisk > 0.38) {
     targetLufs = -13;
   } else if (profile.name === 'punchy' && limiterRisk < 0.25 && analysis.codecStress < 0.25) {
@@ -964,8 +1039,12 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
   const stereoWidth = stereoRisk > 0.75 ? 95 : (stereoRisk < 0.15 && profile.name === 'spatial' ? 110 : 100);
   const darkButSafe = airDB < -24 && presenceToBodyDB < -10 && !fragileHighs && limiterRisk < 0.35 && analysis.codecStress < 0.28;
   const muddyOrVeiled = mudDB > -7.5 || (airDB < -23 && presenceToBodyDB < -8 && harshDB < -12);
-  const addAir = darkButSafe && !lowBitrate;
-  const addPunch = !clippedOrPinned && limiterRisk < 0.55 && (peaks.loudestCrestDB ?? analysis.crestDB) > 7.5;
+  const addAir = darkButSafe && !isLossy && !lowBitrate;
+  const addPunch = !percussiveArtifactRisk &&
+    !clippedOrPinned &&
+    limiterRisk < 0.45 &&
+    (peaks.loudestCrestDB ?? analysis.crestDB) > 8.5;
+  const tapeWarmth = !percussiveArtifactRisk && limiterRisk < 0.45;
   const autoLevel = (peaks.dynamicSpreadDB ?? 0) > 7.5 && !clippedOrPinned;
 
   return {
@@ -981,13 +1060,13 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
     stereoWidth,
     centerBass: true,
     cleanLowEnd: true,
-    glueCompression: true,
+    glueCompression: !percussiveArtifactRisk,
     deharsh: true,
     autoLevel,
     addPunch,
     addAir,
     cutMud: muddyOrVeiled,
-    tapeWarmth: true,
+    tapeWarmth,
     reasons: {
       codecStress: analysis.codecStress,
       limiterRisk,
@@ -995,7 +1074,8 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
       lowBitrate,
       stereoRisk,
       fragileHighs,
-      subToBassDB
+      subToBassDB,
+      percussiveArtifactRisk
     }
   };
 }

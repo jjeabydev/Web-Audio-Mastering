@@ -5,6 +5,7 @@ import {
   applyLimiterStressGuard,
   applyReferenceMatch,
   applyStereoStabilityGuard,
+  applyPianoHighArtifactSuppressor,
   chooseAIMasteringProfile,
   getAIMasteringRecommendation,
   finalizeMasteringTarget
@@ -476,6 +477,10 @@ describe('AI-generated mastering repair', () => {
     expect(recommendation.truePeakCeiling).toBeLessThanOrEqual(-1);
     expect(recommendation.limiterCharacter).toBe('transparent');
     expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(75);
+    expect(recommendation.addPunch).toBe(false);
+    expect(recommendation.tapeWarmth).toBe(false);
+    expect(recommendation.glueCompression).toBe(false);
+    expect(recommendation.reasons.percussiveArtifactRisk).toBe(true);
   });
 
   it('returns every UI control needed to reset AI Auto from analysis', () => {
@@ -524,7 +529,7 @@ describe('AI-generated mastering repair', () => {
     expect(Number.isFinite(recommendation.artifactProtection)).toBe(true);
   });
 
-  it('recommends clarity and air for dark but safe lossy sources', () => {
+  it('uses clarity without forced air for dark but safe lossy sources', () => {
     const buffer = makeToneBuffer({
       frequencies: [
         [120, 0.08],
@@ -542,9 +547,9 @@ describe('AI-generated mastering repair', () => {
     });
 
     expect(profile.name).toBe('clarity');
-    expect(recommendation.addAir).toBe(true);
+    expect(recommendation.addAir).toBe(false);
     expect(recommendation.cutMud).toBe(true);
-    expect(recommendation.artifactProtection).toBeLessThanOrEqual(80);
+    expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(75);
   });
 
   it('opens veiled low-bitrate sources with mud cleanup instead of forced air', () => {
@@ -583,5 +588,25 @@ describe('AI-generated mastering repair', () => {
     });
 
     expect(findTruePeak(calibrated.buffer)).toBeLessThanOrEqual(-0.95);
+  });
+
+  it('suppresses isolated high-note piano crackle without dulling the tone', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [880, 0.08],
+        [1760, 0.05],
+        [3520, 0.025]
+      ]
+    });
+    const channel = buffer.getChannelData(0);
+    channel[1200] += 0.24;
+    channel[3600] -= 0.22;
+
+    const repaired = applyPianoHighArtifactSuppressor(buffer, { amount: 0.8 });
+    const out = repaired.getChannelData(0);
+
+    expect(Math.abs(out[1200] - channel[1200])).toBeGreaterThan(0.05);
+    expect(Math.abs(out[3600] - channel[3600])).toBeGreaterThan(0.05);
+    expect(Math.abs(out[2000] - channel[2000])).toBeLessThan(0.01);
   });
 });

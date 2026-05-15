@@ -52,13 +52,28 @@ describe('adaptive final filters', () => {
     expect(options.lowpass).toBe(false);
   });
 
-  it('keeps 18k cleanup on fragile high-frequency sources', () => {
+  it('uses stronger cleanup on metallic high-frequency sources', () => {
     const options = getAdaptiveFinalFilterOptions({
       codecStress: 0.5,
       limiterRisk: 0.2,
       profile: {
         harshDB: -10,
         metallicDB: -12,
+        airDB: -18
+      }
+    });
+
+    expect(options.lowpass).toBe(true);
+    expect(options.lowpassFreq).toBe(16500);
+  });
+
+  it('keeps 18k cleanup on moderately fragile clean sources', () => {
+    const options = getAdaptiveFinalFilterOptions({
+      codecStress: 0.38,
+      limiterRisk: 0.2,
+      profile: {
+        harshDB: -13,
+        metallicDB: -15,
         airDB: -18
       }
     });
