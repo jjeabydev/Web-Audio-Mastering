@@ -109,6 +109,21 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     ? Math.min(settings.targetLufs ?? -14, -14.5)
     : settings.targetLufs;
 
+  if (artifactSafeMode) {
+    const inputGainDb = Number(settings.inputGain) || 0;
+    if (inputGainDb !== 0) {
+      renderedBuffer = applyGain(renderedBuffer, inputGainDb);
+    }
+    if (settings.cleanLowEnd) {
+      renderedBuffer = applyFinalFilters(renderedBuffer, {
+        highpass: true,
+        lowpass: false,
+        highpassFreq: 30,
+        highpassQ: 0.7
+      });
+    }
+  }
+
   // 1. Deharsh / Hybrid Dynamic Processor (if enabled)
   if (settings.deharsh && !artifactSafeMode) {
     console.log(`${logPrefix} Applying hybrid dynamic processor...`);
@@ -155,7 +170,7 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   if (onProgress) onProgress(0.26);
 
   // 2. Exciter / Add Air (if enabled)
-  if (settings.addAir) {
+  if (settings.addAir && !artifactSafeMode) {
     console.log(`${logPrefix} Applying exciter...`);
     renderedBuffer = applyExciter(renderedBuffer, (p) => {
       if (onProgress) onProgress(0.26 + p * 0.04);
@@ -164,7 +179,7 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   if (onProgress) onProgress(0.30);
 
   // 3. Multiband Saturation / Tape Warmth (if enabled)
-  if (settings.tapeWarmth) {
+  if (settings.tapeWarmth && !artifactSafeMode) {
     console.log(`${logPrefix} Applying multiband saturation...`);
     renderedBuffer = applyTapeWarmth(renderedBuffer, (p) => {
       if (onProgress) onProgress(0.30 + p * 0.15);
@@ -173,7 +188,7 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   if (onProgress) onProgress(0.45);
 
   // 4. Multiband Transient / Add Punch (if enabled)
-  if (settings.addPunch) {
+  if (settings.addPunch && !artifactSafeMode) {
     console.log(`${logPrefix} Applying multiband transient...`);
     const transientAmount = settings.isLossySource || (settings.artifactProtection ?? 0) >= 0.78
       ? 0.45
@@ -186,7 +201,11 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
 
   if (artifactSafeMode) {
     console.log(`${logPrefix} Suppressing high-note piano artifacts...`);
-    renderedBuffer = applyPianoHighArtifactSuppressor(renderedBuffer, { amount: 0.7 });
+    const artifactAmount = Math.max(0, Math.min(1, settings.artifactProtection ?? 0.7));
+    renderedBuffer = applyPianoHighArtifactSuppressor(renderedBuffer, {
+      amount: Math.min(0.96, 0.58 + artifactAmount * 0.42),
+      sensitivity: Math.min(1, 0.45 + artifactAmount * 0.6)
+    });
   }
 
   if (settings.referenceMatch && settings.referenceAnalysis && !artifactSafeMode) {

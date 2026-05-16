@@ -828,6 +828,48 @@ function isCurrentArtifactSafeSource() {
     Number(sibilanceProtection?.value || 0) >= 75;
 }
 
+function getBypassPlaybackBuffer() {
+  const levelMatch = document.getElementById('levelMatchBtn')?.checked;
+  return levelMatch
+    ? fileState.normalizedBuffer || fileState.originalBuffer
+    : fileState.originalBuffer;
+}
+
+function getActivePlaybackBuffer() {
+  if (playerState.isBypassed) {
+    return getBypassPlaybackBuffer();
+  }
+
+  if (isCurrentArtifactSafeSource()) {
+    return fileState.cachedRenderBuffer || null;
+  }
+
+  if (fileState.forceLivePreview) {
+    return fileState.normalizedBuffer || fileState.originalBuffer || audioNodes.buffer;
+  }
+
+  return fileState.cachedRenderBuffer || fileState.normalizedBuffer || audioNodes.buffer || fileState.originalBuffer;
+}
+
+function getTimelineBuffer() {
+  return getActivePlaybackBuffer() || audioNodes.buffer || fileState.normalizedBuffer || fileState.originalBuffer;
+}
+
+function clampPlaybackTime(time, buffer = getTimelineBuffer()) {
+  const duration = Number(buffer?.duration) || 0;
+  if (!duration) return Math.max(0, Number(time) || 0);
+  return Math.max(0, Math.min(Number(time) || 0, Math.max(0, duration - 0.001)));
+}
+
+function syncTimelineDuration(buffer = getTimelineBuffer()) {
+  if (!buffer) return;
+  seekBar.max = buffer.duration;
+  durationEl.textContent = formatTime(buffer.duration);
+  playerState.pauseTime = clampPlaybackTime(playerState.pauseTime, buffer);
+  seekBar.value = playerState.pauseTime;
+  updateWaveSurferProgress(playerState.pauseTime, buffer.duration);
+}
+
 function switchToLivePreview() {
   if (!playerState.isPlaying || playerState.isBypassed || !audioNodes.context || !fileState.originalBuffer) {
     return;
@@ -1047,6 +1089,11 @@ function scheduleRenderToCache(options = {}) {
           fileState.waveformMode = 'original';
           showProcessedWaveform(buffer);
         }
+        seekBar.max = buffer.duration;
+        durationEl.textContent = formatTime(buffer.duration);
+        if (!playerState.isPlaying) {
+          syncTimelineDuration(buffer);
+        }
 
         // Update LUFS display
         if (outputLufsDisplay) {
@@ -1070,7 +1117,7 @@ function scheduleRenderToCache(options = {}) {
         // after any setting change.
         if (playerState.isPlaying && !playerState.isBypassed && audioNodes.context) {
           const currentTime = audioNodes.context.currentTime - playerState.startTime;
-          playerState.pauseTime = Math.max(0, Math.min(currentTime, buffer.duration - 0.001));
+          playerState.pauseTime = clampPlaybackTime(currentTime, buffer);
           playAudio();
         }
       } else {
@@ -1372,11 +1419,12 @@ async function loadAudioFile(file) {
     // Initialize waveform display with original file blob
     initWaveSurfer(audioNodes.buffer, originalBlob, {
       onSeek: (time) => {
-        seekBar.value = time;
-        currentTimeEl.textContent = formatTime(time);
-        seekTo(time);
+        const safeTime = clampPlaybackTime(time);
+        seekBar.value = safeTime;
+        currentTimeEl.textContent = formatTime(safeTime);
+        seekTo(safeTime);
       },
-      getBuffer: () => audioNodes.buffer
+      getBuffer: () => getTimelineBuffer()
     });
 
     // Keep play button disabled until cache render completes
@@ -1413,27 +1461,27 @@ function playAudio() {
 
   if (playerState.isBypassed) {
     // Bypass: check Level Match setting
-    const levelMatch = document.getElementById('levelMatchBtn').checked;
-
-    if (levelMatch) {
-      // Level Match ON: use normalized buffer (approx volume match)
-      playbackBuffer = fileState.normalizedBuffer || fileState.originalBuffer;
+    playbackBuffer = getBypassPlaybackBuffer();
+    if (document.getElementById('levelMatchBtn')?.checked) {
       console.log('[Playback] Bypass ON (Level Matched) - using normalizedBuffer');
     } else {
-      // Level Match OFF: use original raw buffer (true bypass)
-      playbackBuffer = fileState.originalBuffer;
       console.log('[Playback] Bypass ON (True Bypass) - using originalBuffer');
     }
 
     useDirectOutput = true; // Skip effects chain entirely
   } else {
     if (isCurrentArtifactSafeSource()) {
-      playbackBuffer = fileState.cachedRenderBuffer || fileState.originalBuffer;
+      if (!fileState.cachedRenderBuffer) {
+        playBtn.disabled = true;
+        scheduleRenderToCache({ immediate: true });
+        showToast('피아노 보호 렌더를 준비하는 중입니다. 잠시 후 다시 재생해 주세요.', '', 2500);
+        return;
+      }
+      playbackBuffer = fileState.cachedRenderBuffer;
       useDirectOutput = true;
       console.log('[Playback] FX ON - artifact-safe direct preview');
-    } else
-    // FX ON: use the live chain immediately while a new rendered preview is catching up.
-    if (fileState.forceLivePreview) {
+    } else if (fileState.forceLivePreview) {
+      // FX ON: use the live chain immediately while a new rendered preview is catching up.
       playbackBuffer = fileState.normalizedBuffer || fileState.originalBuffer || audioNodes.buffer;
       useDirectOutput = false;
       console.log('[Playback] FX ON - live preview while cache renders');
@@ -1477,7 +1525,9 @@ function playAudio() {
       }
     };
 
-    const offset = playerState.pauseTime;
+    const offset = clampPlaybackTime(playerState.pauseTime, playbackBuffer);
+    playerState.pauseTime = offset;
+    syncTimelineDuration(playbackBuffer);
     playerState.startTime = audioNodes.context.currentTime - offset;
     audioNodes.source.start(0, offset);
     playerState.isPlaying = true;
@@ -1510,7 +1560,7 @@ function playAudio() {
 function pauseAudio() {
   if (!playerState.isPlaying) return;
 
-  playerState.pauseTime = audioNodes.context.currentTime - playerState.startTime;
+  playerState.pauseTime = clampPlaybackTime(audioNodes.context.currentTime - playerState.startTime);
   stopAudio();
   stopMeterAnimation();
 }
@@ -1533,11 +1583,27 @@ function stopAudio() {
 }
 
 function seekTo(time) {
-  // Prevent race condition from rapid seeks
-  if (playerState.isSeeking) return;
+  // Rapid timeline drags must keep audio and cursor together. Cancel the old
+  // unlock timer and let the latest seek replace the previous source.
+  if (playerState.seekTimeout) {
+    clearTimeout(playerState.seekTimeout);
+    playerState.seekTimeout = null;
+  }
   playerState.isSeeking = true;
 
-  playerState.pauseTime = time;
+  let playbackBuffer = getActivePlaybackBuffer();
+  if (!playbackBuffer && !playerState.isBypassed && isCurrentArtifactSafeSource()) {
+    playBtn.disabled = true;
+    scheduleRenderToCache({ immediate: true });
+    showToast('피아노 보호 렌더를 준비하는 중입니다. 잠시 후 다시 이동해 주세요.', '', 2200);
+    playerState.isSeeking = false;
+    return;
+  }
+
+  const safeTime = clampPlaybackTime(time, playbackBuffer || getTimelineBuffer());
+  playerState.pauseTime = safeTime;
+  seekBar.value = safeTime;
+  currentTimeEl.textContent = formatTime(safeTime);
 
   if (playerState.isPlaying) {
     if (audioNodes.source) {
@@ -1554,21 +1620,14 @@ function seekTo(time) {
     clearInterval(playerState.seekUpdateInterval);
 
     // Select correct buffer based on bypass state (same logic as playAudio)
-    let playbackBuffer;
     let useDirectOutput = false;
 
     if (playerState.isBypassed) {
-      // Bypass: respect Level Match (same as playAudio)
-      const levelMatch = document.getElementById('levelMatchBtn')?.checked;
-      if (levelMatch) {
-        playbackBuffer = fileState.normalizedBuffer || fileState.originalBuffer;
-      } else {
-        playbackBuffer = fileState.originalBuffer;
-      }
+      playbackBuffer = getBypassPlaybackBuffer();
       useDirectOutput = true;
     } else {
       if (isCurrentArtifactSafeSource()) {
-        playbackBuffer = fileState.cachedRenderBuffer || fileState.originalBuffer;
+        playbackBuffer = fileState.cachedRenderBuffer;
         useDirectOutput = true;
       } else if (fileState.forceLivePreview) {
         playbackBuffer = fileState.normalizedBuffer || fileState.originalBuffer || audioNodes.buffer;
@@ -1582,6 +1641,15 @@ function seekTo(time) {
         useDirectOutput = false;
       }
     }
+
+    if (!playbackBuffer) {
+      playerState.isSeeking = false;
+      return;
+    }
+
+    const restartTime = clampPlaybackTime(safeTime, playbackBuffer);
+    playerState.pauseTime = restartTime;
+    syncTimelineDuration(playbackBuffer);
 
     audioNodes.source = audioNodes.context.createBufferSource();
     audioNodes.source.buffer = playbackBuffer;
@@ -1600,8 +1668,8 @@ function seekTo(time) {
       }
     };
 
-    playerState.startTime = audioNodes.context.currentTime - time;
-    audioNodes.source.start(0, time);
+    playerState.startTime = audioNodes.context.currentTime - restartTime;
+    audioNodes.source.start(0, restartTime);
 
     playerState.seekUpdateInterval = setInterval(() => {
       if (playerState.isPlaying && playbackBuffer && !playerState.isSeeking) {
@@ -1619,15 +1687,10 @@ function seekTo(time) {
       }
     }, 100);
   } else {
-    currentTimeEl.textContent = formatTime(time);
-    updateWaveSurferProgress(time, audioNodes.buffer?.duration);
+    updateWaveSurferProgress(safeTime, (playbackBuffer || getTimelineBuffer())?.duration);
   }
 
   // Release seek lock after a brief delay to allow audio to stabilize
-  // Clear any existing timeout to prevent premature unlock from rapid seeks
-  if (playerState.seekTimeout) {
-    clearTimeout(playerState.seekTimeout);
-  }
   playerState.seekTimeout = setTimeout(() => {
     playerState.isSeeking = false;
     playerState.seekTimeout = null;
@@ -1969,7 +2032,7 @@ bypassBtn.addEventListener('click', () => {
   if (playerState.isPlaying) {
     console.log('[Bypass] Restarting playback to switch buffer');
     const currentTime = audioNodes.context.currentTime - playerState.startTime;
-    playerState.pauseTime = currentTime;
+    playerState.pauseTime = clampPlaybackTime(currentTime);
     playAudio(); // This will use the correct buffer based on isBypassed
   }
 });
@@ -2674,6 +2737,16 @@ function refineModeDefaultsForCurrentSource(defaults) {
     codecStress > 0.32 ||
     (profile.metallicDB ?? -18) > -14.5 ||
     (profile.harshDB ?? -18) > -11.5;
+  const pianoHighArtifactRisk = (
+    isLossy &&
+    (
+      (profile.metallicDB ?? -18) > -15.5 ||
+      (profile.harshDB ?? -18) > -12.5 ||
+      codecStress > 0.34 ||
+      (peaks.peakDensity ?? 0) > 0.006 ||
+      (peaks.loudestCrestDB ?? analysis.crestDB ?? 12) < 8
+    )
+  ) || (profile.metallicDB ?? -18) > -12.5 || codecStress > 0.58;
 
   if (clippedOrPinned || limiterRisk > 0.55 || (peaks.loudestCrestDB ?? 12) < 6.5) {
     refined.inputGain = Math.min(refined.inputGain ?? -3.5, -5.5);
@@ -2706,6 +2779,19 @@ function refineModeDefaultsForCurrentSource(defaults) {
     refined.aiIntensity = Math.min(refined.aiIntensity ?? 100, 100);
     refined.sibilanceProtection = Math.max(refined.sibilanceProtection ?? 65, 78);
     refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 82);
+    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -14.5);
+    refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
+    refined.limiterCharacter = 'transparent';
+    refined.addAir = false;
+    refined.addPunch = false;
+    refined.tapeWarmth = false;
+    refined.glueCompression = false;
+  }
+
+  if (pianoHighArtifactRisk) {
+    refined.aiIntensity = Math.min(refined.aiIntensity ?? 100, 95);
+    refined.sibilanceProtection = Math.max(refined.sibilanceProtection ?? 65, 80);
+    refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 85);
     refined.targetLufs = Math.min(refined.targetLufs ?? -12, -14.5);
     refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
     refined.limiterCharacter = 'transparent';

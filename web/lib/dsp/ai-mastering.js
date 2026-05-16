@@ -907,6 +907,7 @@ export function applyStereoStabilityGuard(buffer, options = {}) {
 
 export function applyPianoHighArtifactSuppressor(buffer, options = {}) {
   const amount = clamp(options.amount ?? 0.65, 0, 1);
+  const sensitivity = clamp(options.sensitivity ?? 0.75, 0, 1);
   if (!buffer || amount <= 0) return buffer;
 
   const length = buffer.length;
@@ -918,7 +919,7 @@ export function applyPianoHighArtifactSuppressor(buffer, options = {}) {
   });
   const window = Math.max(12, Math.round(sampleRate * 0.00045));
   const halfWindow = Math.floor(window / 2);
-  const absFloor = 0.012;
+  const absFloor = 0.006;
 
   for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
     const input = buffer.getChannelData(ch);
@@ -946,14 +947,25 @@ export function applyPianoHighArtifactSuppressor(buffer, options = {}) {
         input[i + 3]
       ) / 12;
       const residual = input[i] - predicted;
+      const curvature = Math.abs(input[i - 1] - input[i] * 2 + input[i + 1]);
       const edgeJump = Math.min(
         Math.abs(input[i] - input[i - 1]),
         Math.abs(input[i] - input[i + 1])
       );
-      const threshold = Math.max(absFloor, localAvg * 1.25);
-      const isolated = edgeJump > threshold * 0.9;
+      const threshold = Math.max(absFloor, localAvg * (1.35 - sensitivity * 0.45));
+      const edgeGate = threshold * (0.95 - sensitivity * 0.28);
+      const curvatureGate = threshold * (1.45 - sensitivity * 0.42);
+      const burstGate = threshold * (2.05 - sensitivity * 0.5);
+      const residualGate = threshold * (1.25 - sensitivity * 0.35);
+      const isolated = (
+        edgeJump > edgeGate &&
+        curvature > curvatureGate
+      ) || (
+        curvature > burstGate &&
+        Math.abs(residual) > residualGate
+      );
 
-      if (isolated && Math.abs(residual) > threshold) {
+      if (isolated && Math.abs(residual) > residualGate) {
         const limitedResidual = Math.sign(residual) * threshold;
         const repaired = predicted + limitedResidual;
         out[i] = input[i] * (1 - amount) + repaired * amount;
@@ -979,6 +991,16 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
   const limiterRisk = analysis.limiterRisk ?? 0;
 
   const percussiveArtifactRisk = isLossy || fragileHighs || metallicDB > -14.5 || analysis.codecStress > 0.32;
+  const pianoHighArtifactRisk = (
+    isLossy &&
+    (
+      metallicDB > -15.5 ||
+      harshDB > -12.5 ||
+      analysis.codecStress > 0.34 ||
+      (peaks.peakDensity ?? 0) > 0.006 ||
+      (peaks.loudestCrestDB ?? analysis.crestDB) < 8
+    )
+  ) || metallicDB > -12.5 || analysis.codecStress > 0.58;
 
   let targetLufs = -12;
   if (clippedOrPinned || limiterRisk > 0.58 || lowBitrate || peaks.loudestCrestDB < 6.5) {
@@ -1023,7 +1045,7 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
     0.9
   );
 
-  const artifactProtection = clamp(
+  let artifactProtection = clamp(
     0.7 +
     analysis.codecStress * 0.2 +
     Math.max(0, metallicDB + 15) * 0.025 +
@@ -1031,8 +1053,12 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
     0.65,
     0.92
   );
+  if (pianoHighArtifactRisk) {
+    artifactProtection = Math.max(artifactProtection, 0.85);
+  }
+  artifactProtection = Math.min(artifactProtection, 0.85);
 
-  const limiterCharacter = (clippedOrPinned || fragileHighs || limiterRisk > 0.5)
+  const limiterCharacter = (lowBitrate || pianoHighArtifactRisk || clippedOrPinned || fragileHighs || limiterRisk > 0.5)
     ? 'transparent'
     : (profile.name === 'punchy' && (peaks.loudestCrestDB ?? 0) > 9.5 ? 'punch' : 'balanced');
 
@@ -1075,7 +1101,8 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
       stereoRisk,
       fragileHighs,
       subToBassDB,
-      percussiveArtifactRisk
+      percussiveArtifactRisk,
+      pianoHighArtifactRisk
     }
   };
 }

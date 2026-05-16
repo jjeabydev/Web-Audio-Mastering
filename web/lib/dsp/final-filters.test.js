@@ -82,6 +82,28 @@ describe('adaptive final filters', () => {
     expect(options.lowpassFreq).toBe(18000);
   });
 
+  it('keeps lossy piano-safe cleanup open enough to avoid a muffled master', () => {
+    const options = getAdaptiveFinalFilterOptions(null, {
+      isLossySource: true,
+      artifactProtection: 0.85,
+      sibilanceProtection: 0.8
+    });
+
+    expect(options.lowpass).toBe(true);
+    expect(options.lowpassFreq).toBeGreaterThanOrEqual(18500);
+  });
+
+  it('lets metallic protection 90 add slightly stronger ultrasonic cleanup', () => {
+    const options = getAdaptiveFinalFilterOptions(null, {
+      isLossySource: true,
+      artifactProtection: 0.9,
+      sibilanceProtection: 0.8
+    });
+
+    expect(options.lowpass).toBe(true);
+    expect(options.lowpassFreq).toBe(18000);
+  });
+
   it('preserves more high-frequency air with the open setting', () => {
     const buffer = makeSineBuffer(14000);
     const fixed = applyFinalFilters(buffer, {

@@ -52,6 +52,15 @@ function makeToneBuffer({ sampleRate = 48000, seconds = 1, frequencies }) {
   return buffer;
 }
 
+function rmsDiff(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    const diff = a[i] - b[i];
+    sum += diff * diff;
+  }
+  return Math.sqrt(sum / a.length);
+}
+
 function makeWidePhaseBuffer({ sampleRate = 48000, seconds = 1 }) {
   const length = sampleRate * seconds;
   const buffer = new TestAudioBuffer({ numberOfChannels: 2, length, sampleRate });
@@ -483,6 +492,67 @@ describe('AI-generated mastering repair', () => {
     expect(recommendation.reasons.percussiveArtifactRisk).toBe(true);
   });
 
+  it('raises metallic protection to piano-safe range for lossy high-note artifact risk', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [880, 0.12],
+        [3520, 0.08],
+        [7040, 0.08],
+        [10800, 0.2]
+      ]
+    });
+    const recommendation = getAIMasteringRecommendation(
+      analyzeAIGeneratedMastering(buffer),
+      { bitrateKbps: 192, isLossy: true }
+    );
+
+    expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(85);
+    expect(recommendation.artifactProtection).toBeLessThan(90);
+    expect(recommendation.truePeakCeiling).toBeLessThanOrEqual(-1.5);
+    expect(recommendation.targetLufs).toBeLessThanOrEqual(-14.5);
+    expect(recommendation.limiterCharacter).toBe('transparent');
+    expect(recommendation.addAir).toBe(false);
+    expect(recommendation.reasons.pianoHighArtifactRisk).toBe(true);
+  });
+
+  it('keeps clean lossy sources below manual metallic rescue strength', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [120, 0.1],
+        [900, 0.08],
+        [3200, 0.025],
+        [9500, 0.01]
+      ]
+    });
+    const recommendation = getAIMasteringRecommendation(
+      analyzeAIGeneratedMastering(buffer),
+      { bitrateKbps: 256, isLossy: true }
+    );
+
+    expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(75);
+    expect(recommendation.artifactProtection).toBeLessThan(90);
+    expect(recommendation.addAir).toBe(false);
+  });
+
+  it('can raise protection for wav sources when analysis shows piano-like high artifact risk', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [880, 0.12],
+        [3520, 0.08],
+        [7040, 0.08],
+        [10800, 0.22]
+      ]
+    });
+    const recommendation = getAIMasteringRecommendation(
+      analyzeAIGeneratedMastering(buffer),
+      { isLossy: false }
+    );
+
+    expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(85);
+    expect(recommendation.artifactProtection).toBeLessThan(90);
+    expect(recommendation.reasons.pianoHighArtifactRisk).toBe(true);
+  });
+
   it('returns every UI control needed to reset AI Auto from analysis', () => {
     const buffer = makeToneBuffer({
       frequencies: [
@@ -608,5 +678,69 @@ describe('AI-generated mastering repair', () => {
     expect(Math.abs(out[1200] - channel[1200])).toBeGreaterThan(0.05);
     expect(Math.abs(out[3600] - channel[3600])).toBeGreaterThan(0.05);
     expect(Math.abs(out[2000] - channel[2000])).toBeLessThan(0.01);
+  });
+
+  it('reduces alternating high-note crackle bursts', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [1320, 0.06],
+        [2640, 0.04],
+        [5280, 0.02]
+      ]
+    });
+    const channel = buffer.getChannelData(0);
+    const before = [1400, 1402, 1404].map((idx, n) => {
+      channel[idx] += n % 2 === 0 ? 0.18 : -0.16;
+      return channel[idx];
+    });
+
+    const repaired = applyPianoHighArtifactSuppressor(buffer, { amount: 0.85 });
+    const out = repaired.getChannelData(0);
+
+    expect(Math.abs(out[1400] - before[0])).toBeGreaterThan(0.03);
+    expect(Math.abs(out[1402] - before[1])).toBeGreaterThan(0.03);
+    expect(Math.abs(out[1404] - before[2])).toBeGreaterThan(0.03);
+  });
+
+  it('uses stronger piano decrackle when metallic protection is near 90', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [1320, 0.06],
+        [2640, 0.04],
+        [5280, 0.02]
+      ]
+    });
+    const channel = buffer.getChannelData(0);
+    channel[2200] += 0.08;
+    channel[2202] -= 0.075;
+
+    const light = applyPianoHighArtifactSuppressor(buffer, {
+      amount: 0.65,
+      sensitivity: 0.45
+    });
+    const strong = applyPianoHighArtifactSuppressor(buffer, {
+      amount: 0.96,
+      sensitivity: 0.99
+    });
+
+    const lightReduction = Math.abs(light.getChannelData(0)[2200] - channel[2200]);
+    const strongReduction = Math.abs(strong.getChannelData(0)[2200] - channel[2200]);
+    expect(strongReduction).toBeGreaterThan(lightReduction + 0.01);
+  });
+
+  it('does not dull clean sustained high piano harmonics', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [1046.5, 0.06],
+        [2093, 0.04],
+        [4186, 0.025],
+        [8372, 0.01]
+      ]
+    });
+    const before = buffer.getChannelData(0).slice();
+    const repaired = applyPianoHighArtifactSuppressor(buffer, { amount: 0.85 });
+    const after = repaired.getChannelData(0);
+
+    expect(rmsDiff(before, after)).toBeLessThan(0.003);
   });
 });

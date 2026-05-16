@@ -1578,19 +1578,19 @@ self.onmessage = async (e) => {
         }
 
         // 2. Exciter / Add Air (if enabled)
-        if (settings.addAir) {
+        if (settings.addAir && !artifactSafeMode) {
           sendProgress(id, 0.3, 'Applying exciter...');
           buffer = applyExciter(buffer);
         }
 
         // 3. Multiband Saturation / Tape Warmth (if enabled)
-        if (settings.tapeWarmth) {
+        if (settings.tapeWarmth && !artifactSafeMode) {
           sendProgress(id, 0.45, 'Applying multiband saturation...');
           buffer = applyTapeWarmth(buffer);
         }
 
         // 4. Multiband Transient / Add Punch (if enabled)
-        if (settings.addPunch) {
+        if (settings.addPunch && !artifactSafeMode) {
           sendProgress(id, 0.55, 'Applying multiband transient...');
           const transientAmount = settings.isLossySource || (settings.artifactProtection ?? 0) >= 0.78
             ? 0.45
@@ -1600,7 +1600,11 @@ self.onmessage = async (e) => {
 
         if (artifactSafeMode) {
           sendProgress(id, 0.56, 'Suppressing high-note piano artifacts...');
-          buffer = applyPianoHighArtifactSuppressor(buffer, { amount: 0.7 });
+          const artifactAmount = Math.max(0, Math.min(1, settings.artifactProtection ?? 0.7));
+          buffer = applyPianoHighArtifactSuppressor(buffer, {
+            amount: Math.min(0.96, 0.58 + artifactAmount * 0.42),
+            sensitivity: Math.min(1, 0.45 + artifactAmount * 0.6)
+          });
         }
 
         if (settings.referenceMatch && settings.referenceAnalysis && !artifactSafeMode) {
