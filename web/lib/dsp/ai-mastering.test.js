@@ -6,6 +6,7 @@ import {
   applyReferenceMatch,
   applyStereoStabilityGuard,
   applyPianoHighArtifactSuppressor,
+  applyMetallicRescueTone,
   chooseAIMasteringProfile,
   getAIMasteringRecommendation,
   finalizeMasteringTarget
@@ -246,6 +247,27 @@ describe('AI-generated mastering repair', () => {
     expect(truePeakDB).toBeGreaterThan(samplePeakDB);
     expect(analysis.peak).toBeGreaterThan(0.97);
     expect(analysis.peaks.truePeakHeadroomDB).toBeCloseTo(-truePeakDB, 1);
+  });
+
+  it('detects click-style artifact risk outside the high bands', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [180, 0.1],
+        [900, 0.08]
+      ]
+    });
+    const channel = buffer.getChannelData(0);
+    for (const idx of [2200, 4800, 7600, 11200]) {
+      channel[idx] += 0.16;
+      channel[idx + 1] -= 0.14;
+    }
+
+    const analysis = analyzeAIGeneratedMastering(buffer);
+    const recommendation = getAIMasteringRecommendation(analysis, { isLossy: false });
+
+    expect(analysis.peaks.spikeDensity).toBeGreaterThan(0);
+    expect(recommendation.reasons.pianoHighArtifactRisk).toBe(true);
+    expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(85);
   });
 
   it('applies profile tone and intensity to mastering moves', () => {
@@ -726,6 +748,29 @@ describe('AI-generated mastering repair', () => {
     const lightReduction = Math.abs(light.getChannelData(0)[2200] - channel[2200]);
     const strongReduction = Math.abs(strong.getChannelData(0)[2200] - channel[2200]);
     expect(strongReduction).toBeGreaterThan(lightReduction + 0.01);
+  });
+
+  it('restores metallic rescue tone reduction at 90 without heavy broad dulling', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [1046.5, 0.05],
+        [4186, 0.025],
+        [7800, 0.08],
+        [10800, 0.16]
+      ]
+    });
+    const before = analyzeAIGeneratedMastering(buffer);
+    const rescued = applyMetallicRescueTone(buffer, {
+      amount: 1,
+      artifactProtection: 0.9,
+      sibilanceProtection: 0.8,
+      isLossySource: false
+    });
+    const after = analyzeAIGeneratedMastering(rescued.buffer);
+
+    expect(rescued.moves.metallicCut).toBeLessThan(-0.3);
+    expect(after.bands.metallic).toBeLessThan(before.bands.metallic);
+    expect(after.bands.body).toBeGreaterThan(before.bands.body * 0.85);
   });
 
   it('does not dull clean sustained high piano harmonics', () => {

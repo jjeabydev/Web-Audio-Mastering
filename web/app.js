@@ -2479,6 +2479,7 @@ function getModeProfileLabel() {
     return `AI ${formatProfileName(fileState.aiAutoRecommendation.profile)}`;
   }
   if (activePreset === 'ai-clean') return 'AI Clean';
+  if (activePreset === 'artifact-safe') return 'Artifact Safe';
   if (activePreset === 'ai-loud') return 'AI Loud';
   if (activePreset === 'reference') return 'Reference';
   if (activePreset === 'manual') return 'Manual';
@@ -2622,6 +2623,28 @@ const AI_MODE_DEFAULTS = {
     centerBass: true,
     autoLevel: false
   },
+  artifactSafe: {
+    rescueMode: true,
+    aiProfile: 'clean',
+    aiIntensity: 85,
+    sibilanceProtection: 85,
+    artifactProtection: 95,
+    inputGain: -5.5,
+    truePeakCeiling: -1.5,
+    targetLufs: -15,
+    limiterCharacter: 'transparent',
+    addPunch: false,
+    tapeWarmth: false,
+    addAir: false,
+    cutMud: true,
+    stereoWidth: 98,
+    referenceAmount: 55,
+    cleanLowEnd: true,
+    glueCompression: false,
+    deharsh: true,
+    centerBass: true,
+    autoLevel: false
+  },
   loud: {
     aiProfile: 'loud',
     aiIntensity: 110,
@@ -2744,9 +2767,10 @@ function refineModeDefaultsForCurrentSource(defaults) {
       (profile.harshDB ?? -18) > -12.5 ||
       codecStress > 0.34 ||
       (peaks.peakDensity ?? 0) > 0.006 ||
+      (peaks.spikeDensity ?? 0) > 0.00005 ||
       (peaks.loudestCrestDB ?? analysis.crestDB ?? 12) < 8
     )
-  ) || (profile.metallicDB ?? -18) > -12.5 || codecStress > 0.58;
+  ) || (profile.metallicDB ?? -18) > -12.5 || codecStress > 0.58 || (peaks.spikeDensity ?? 0) > 0.00005;
 
   if (clippedOrPinned || limiterRisk > 0.55 || (peaks.loudestCrestDB ?? 12) < 6.5) {
     refined.inputGain = Math.min(refined.inputGain ?? -3.5, -5.5);
@@ -2801,7 +2825,7 @@ function refineModeDefaultsForCurrentSource(defaults) {
     refined.glueCompression = false;
   }
 
-  if (darkButSafe && !isLossy && !isLowBitrate) {
+  if (darkButSafe && !isLossy && !isLowBitrate && !refined.rescueMode) {
     refined.aiProfile = refined.aiProfile === 'auto' ? 'clarity' : refined.aiProfile;
     refined.addAir = true;
     refined.artifactProtection = Math.min(refined.artifactProtection ?? 75, 75);
@@ -2924,6 +2948,38 @@ function applyAIAutoRecommendation(analysis, source = {}, options = {}) {
   return recommendation;
 }
 
+function getArtifactSafeRecommendation(analysis, source = {}) {
+  const base = getAIMasteringRecommendation(analysis, source);
+  const peaks = analysis?.peaks || {};
+  const spikeRisk = Math.max(0, ((peaks.spikeDensity ?? 0) - 0.0008) * 180);
+  const limiterRisk = analysis?.limiterRisk ?? 0;
+  const codecStress = analysis?.codecStress ?? 0;
+  const rescueBoost = Math.max(spikeRisk, limiterRisk, codecStress);
+  return {
+    ...base,
+    rescueMode: true,
+    aiProfile: base.profile || 'clean',
+    aiIntensity: Math.min(base.aiIntensity ?? 100, rescueBoost > 0.45 ? 85 : 90),
+    sibilanceProtection: Math.max(base.sibilanceProtection ?? 75, 85),
+    artifactProtection: Math.max(base.artifactProtection ?? 80, rescueBoost > 0.45 ? 95 : 90),
+    inputGain: Math.min(base.inputGain ?? -3.5, -5.5),
+    truePeakCeiling: Math.min(base.truePeakCeiling ?? -1, -1.5),
+    targetLufs: Math.min(base.targetLufs ?? -12, -15),
+    limiterCharacter: 'transparent',
+    addPunch: false,
+    tapeWarmth: false,
+    addAir: false,
+    glueCompression: false,
+    autoLevel: false,
+    referenceAmount: Math.min(base.referenceAmount ?? 65, 55),
+    cleanLowEnd: true,
+    centerBass: true,
+    deharsh: true,
+    cutMud: true,
+    stereoWidth: Math.min(base.stereoWidth ?? 100, 98)
+  };
+}
+
 function getCurrentSourceDescriptor() {
   const currentName = currentFile?.name || fileState.selectedFilePath || '';
   return {
@@ -3031,6 +3087,12 @@ function applyAssistantPreset(name) {
 
   if (name === 'ai-clean') {
     applyModeDefaults(AI_MODE_DEFAULTS.clean);
+    referenceMatch.checked = false;
+  } else if (name === 'artifact-safe') {
+    const analysisDefaults = fileState.aiAnalysis
+      ? getArtifactSafeRecommendation(fileState.aiAnalysis, getCurrentSourceDescriptor())
+      : AI_MODE_DEFAULTS.artifactSafe;
+    applyModeDefaults(analysisDefaults);
     referenceMatch.checked = false;
   } else if (name === 'ai-loud') {
     applyModeDefaults(AI_MODE_DEFAULTS.loud);

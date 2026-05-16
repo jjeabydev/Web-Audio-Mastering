@@ -18,6 +18,7 @@ import {
   adjustStereoWidth,
   analyzeAIGeneratedMastering,
   applyAIGeneratedMasteringRepair,
+  applyMetallicRescueTone,
   applyReferenceMatch,
   applyLimiterStressGuard,
   applyStereoStabilityGuard,
@@ -206,6 +207,18 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
       amount: Math.min(0.96, 0.58 + artifactAmount * 0.42),
       sensitivity: Math.min(1, 0.45 + artifactAmount * 0.6)
     });
+    if (artifactAmount >= 0.88) {
+      const rescued = applyMetallicRescueTone(renderedBuffer, {
+        amount: Math.min(1, (artifactAmount - 0.82) / 0.18),
+        sibilanceProtection: settings.sibilanceProtection ?? 0.75,
+        artifactProtection: artifactAmount,
+        isLossySource: settings.isLossySource
+      });
+      renderedBuffer = rescued.buffer;
+      if (rescued.moves) {
+        console.log(`${logPrefix} Metallic rescue moves:`, rescued.moves);
+      }
+    }
   }
 
   if (settings.referenceMatch && settings.referenceAnalysis && !artifactSafeMode) {

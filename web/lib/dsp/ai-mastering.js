@@ -396,6 +396,8 @@ function analyzePeakBehavior(buffer, mono, fullRms, peak, activeRanges = [{ star
   const clipThreshold = 0.999;
   let nearPeakCount = 0;
   let clippedCount = 0;
+  let spikeCount = 0;
+  let residualSum = 0;
   let totalActiveSamples = 0;
 
   for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
@@ -407,6 +409,20 @@ function analyzePeakBehavior(buffer, mono, fullRms, peak, activeRanges = [{ star
         const abs = Math.abs(data[i]);
         if (abs >= nearPeakThreshold) nearPeakCount++;
         if (abs >= clipThreshold) clippedCount++;
+        if (i >= range.start + 2 && i < end - 2) {
+          const predicted = (data[i - 2] + data[i - 1] * 2 + data[i + 1] * 2 + data[i + 2]) / 6;
+          const residual = Math.abs(data[i] - predicted);
+          const localAvg = (
+            Math.abs(data[i - 2]) +
+            Math.abs(data[i - 1]) +
+            Math.abs(data[i + 1]) +
+            Math.abs(data[i + 2])
+          ) / 4;
+          residualSum += residual;
+          if (residual > Math.max(0.018, localAvg * 1.8)) {
+            spikeCount++;
+          }
+        }
       }
     }
   }
@@ -452,6 +468,8 @@ function analyzePeakBehavior(buffer, mono, fullRms, peak, activeRanges = [{ star
   return {
     peakDensity: totalActiveSamples > 0 ? nearPeakCount / totalActiveSamples : 0,
     clipDensity: totalActiveSamples > 0 ? clippedCount / totalActiveSamples : 0,
+    spikeDensity: totalActiveSamples > 0 ? spikeCount / totalActiveSamples : 0,
+    avgSpikeResidual: totalActiveSamples > 0 ? residualSum / totalActiveSamples : 0,
     loudestRmsDB: linearToDb(loudest.rms + 1e-9),
     loudestCrestDB: loudest.crestDB,
     dynamicSpreadDB,
@@ -563,6 +581,8 @@ export function analyzeAIGeneratedMastering(buffer) {
     (metallicDB + 16) * 0.055 +
     (harshDB + 14) * 0.045 +
     Math.max(0, peaks.peakDensity - 0.002) * 34 +
+    Math.max(0, peaks.spikeDensity - 0.0008) * 95 +
+    Math.max(0, peaks.avgSpikeResidual - 0.0015) * 22 +
     Math.max(0, 8 - peaks.loudestCrestDB) * 0.08 +
     Math.max(0, -0.05 - stereo.correlation) * 0.6,
     0,
@@ -571,6 +591,7 @@ export function analyzeAIGeneratedMastering(buffer) {
   const limiterRisk = clamp(
     Math.max(0, peaks.peakDensity - 0.001) * 45 +
     Math.max(0, peaks.clipDensity) * 120 +
+    Math.max(0, peaks.spikeDensity - 0.0008) * 75 +
     Math.max(0, 7.5 - peaks.loudestCrestDB) * 0.11 +
     Math.max(0, subToBassDB + 2) * 0.08,
     0,
@@ -739,6 +760,41 @@ export function applyAIGeneratedMasteringRepair(buffer, options = {}) {
   }
 
   return { buffer: output, analysis, moves, profile };
+}
+
+export function applyMetallicRescueTone(buffer, options = {}) {
+  const amount = clamp(options.amount ?? 1, 0, 1);
+  if (!buffer || amount <= 0) {
+    return { buffer, analysis: null, moves: null };
+  }
+
+  const analysis = analyzeAIGeneratedMastering(buffer);
+  const profile = chooseAIMasteringProfile(analysis, options.profile || 'auto');
+  const moves = getAIGeneratedMasteringMoves(analysis, amount, profile, {
+    sibilanceProtection: options.sibilanceProtection ?? 0.8,
+    artifactProtection: options.artifactProtection ?? 0.9,
+    isLossySource: options.isLossySource
+  });
+
+  let output = buffer;
+  const metallicCut = clamp(moves.metallicCut * (0.55 + amount * 0.35), -3.6, 0);
+  const sibilanceCut = clamp((moves.sibilanceCut + moves.harshCut * 0.45) * (0.35 + amount * 0.25), -2.4, 0);
+  const airShelf = clamp(moves.airShelf + metallicCut * 0.16 + sibilanceCut * 0.08, -1.8, 0);
+
+  output = applyFilterToBuffer(output, 'peaking', 7800, sibilanceCut, 1.25);
+  output = applyFilterToBuffer(output, 'peaking', 10800, metallicCut, 2.4);
+  output = applyFilterToBuffer(output, 'peaking', 11800, metallicCut * 0.35, 1.8);
+  output = applyFilterToBuffer(output, 'highshelf', 12500, airShelf, 0.55);
+
+  return {
+    buffer: output,
+    analysis,
+    moves: {
+      metallicCut,
+      sibilanceCut,
+      airShelf
+    }
+  };
 }
 
 export function applyReferenceMatch(buffer, referenceAnalysis, options = {}) {
@@ -998,15 +1054,16 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
       harshDB > -12.5 ||
       analysis.codecStress > 0.34 ||
       (peaks.peakDensity ?? 0) > 0.006 ||
+      (peaks.spikeDensity ?? 0) > 0.00005 ||
       (peaks.loudestCrestDB ?? analysis.crestDB) < 8
     )
-  ) || metallicDB > -12.5 || analysis.codecStress > 0.58;
+  ) || metallicDB > -12.5 || analysis.codecStress > 0.58 || (peaks.spikeDensity ?? 0) > 0.00005;
 
   let targetLufs = -12;
-  if (clippedOrPinned || limiterRisk > 0.58 || lowBitrate || peaks.loudestCrestDB < 6.5) {
-    targetLufs = -14;
-  } else if (percussiveArtifactRisk) {
+  if (pianoHighArtifactRisk || percussiveArtifactRisk) {
     targetLufs = -14.5;
+  } else if (clippedOrPinned || limiterRisk > 0.58 || lowBitrate || peaks.loudestCrestDB < 6.5) {
+    targetLufs = -14;
   } else if ((isLossy && analysis.codecStress > 0.25) || analysis.codecStress > 0.45 || limiterRisk > 0.38) {
     targetLufs = -13;
   } else if (profile.name === 'punchy' && limiterRisk < 0.25 && analysis.codecStress < 0.25) {

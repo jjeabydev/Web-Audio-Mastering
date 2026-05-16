@@ -34,6 +34,7 @@ import {
   applyLimiterStressGuard,
   applyStereoStabilityGuard,
   applyPianoHighArtifactSuppressor,
+  applyMetallicRescueTone,
   finalizeMasteringTarget
 } from '../lib/dsp/index.js';
 
@@ -1605,6 +1606,15 @@ self.onmessage = async (e) => {
             amount: Math.min(0.96, 0.58 + artifactAmount * 0.42),
             sensitivity: Math.min(1, 0.45 + artifactAmount * 0.6)
           });
+          if (artifactAmount >= 0.88) {
+            const rescued = applyMetallicRescueTone(buffer, {
+              amount: Math.min(1, (artifactAmount - 0.82) / 0.18),
+              sibilanceProtection: settings.sibilanceProtection ?? 0.75,
+              artifactProtection: artifactAmount,
+              isLossySource: settings.isLossySource
+            });
+            buffer = rescued.buffer;
+          }
         }
 
         if (settings.referenceMatch && settings.referenceAnalysis && !artifactSafeMode) {

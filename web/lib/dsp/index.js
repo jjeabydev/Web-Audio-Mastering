@@ -185,6 +185,7 @@ export {
   getAIMasteringRecommendation,
   getAIGeneratedMasteringMoves,
   applyAIGeneratedMasteringRepair,
+  applyMetallicRescueTone,
   applyReferenceMatch,
   applyLimiterStressGuard,
   applyStereoStabilityGuard,
