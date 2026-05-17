@@ -8,6 +8,8 @@
  *   const { channels } = await dspWorker.normalize(audioBuffer, -14, -1, onProgress);
  */
 
+export const DSP_RENDER_REVISION = '2026-05-17-artifact-safe-air-recovery-v2';
+
 export class DSPWorkerInterface {
   constructor() {
     this.worker = null;
@@ -272,7 +274,9 @@ export class DSPWorkerInterface {
     return {
       audioBuffer: processedBuffer,
       lufs: result.lufs,
-      measuredLufs: result.measuredLufs
+      measuredLufs: result.measuredLufs,
+      dspRevision: result.dspRevision,
+      staleWorker: result.dspRevision !== DSP_RENDER_REVISION
     };
   }
 

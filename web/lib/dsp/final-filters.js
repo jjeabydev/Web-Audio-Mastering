@@ -154,8 +154,10 @@ export function getAdaptiveFinalFilterOptions(analysis, settings = {}) {
     const highArtifactRepair = artifactProtection >= 0.82 || sibilanceProtection >= 0.78;
     const strongArtifactRepair = artifactProtection >= 0.9;
     const pianoSafeRepair = lossySource && highArtifactRepair;
-    const lowpassFreq = pianoSafeRepair
-      ? (strongArtifactRepair ? 18000 : 18500)
+    const lowpassFreq = highArtifactRepair && !lossySource
+      ? 20500
+      : pianoSafeRepair
+      ? (strongArtifactRepair ? 18500 : 19500)
       : lossySource || metallicDB > -13.5 || codecStress > 0.45
       ? 16500
       : 18000;

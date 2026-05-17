@@ -8,6 +8,8 @@
  * - Progress: { id: number, type: 'PROGRESS', progress: number, status: string }
  */
 
+const DSP_RENDER_REVISION = '2026-05-17-artifact-safe-air-recovery-v2';
+
 // Import DSP modules
 import {
   K_WEIGHTING,
@@ -35,6 +37,7 @@ import {
   applyStereoStabilityGuard,
   applyPianoHighArtifactSuppressor,
   applyMetallicRescueTone,
+  applyArtifactSafeAirRecovery,
   finalizeMasteringTarget
 } from '../lib/dsp/index.js';
 
@@ -1500,8 +1503,9 @@ self.onmessage = async (e) => {
         const artifactSafeMode = settings.isLossySource ||
           (settings.artifactProtection ?? 0) >= 0.78 ||
           (settings.sibilanceProtection ?? 0) >= 0.75;
+        const rescueArtifactMode = (settings.artifactProtection ?? 0) >= 0.85;
         const safeTargetLufs = artifactSafeMode
-          ? Math.min(settings.targetLufs ?? -14, -14.5)
+          ? Math.min(settings.targetLufs ?? -14, rescueArtifactMode ? -14 : -14.5)
           : settings.targetLufs;
 
         // --- HEAVY FX (Shared) ---
@@ -1602,18 +1606,38 @@ self.onmessage = async (e) => {
         if (artifactSafeMode) {
           sendProgress(id, 0.56, 'Suppressing high-note piano artifacts...');
           const artifactAmount = Math.max(0, Math.min(1, settings.artifactProtection ?? 0.7));
+          const artifactPreAnalysis = analyzeAIGeneratedMastering(buffer);
+          const darkArtifactSafeSource = !settings.isLossySource &&
+            (artifactPreAnalysis.profile?.airDB ?? -18) < -16.2 &&
+            (artifactPreAnalysis.profile?.metallicDB ?? -18) < -18 &&
+            (artifactPreAnalysis.profile?.harshDB ?? -18) < -14;
           buffer = applyPianoHighArtifactSuppressor(buffer, {
-            amount: Math.min(0.96, 0.58 + artifactAmount * 0.42),
-            sensitivity: Math.min(1, 0.45 + artifactAmount * 0.6)
+            amount: darkArtifactSafeSource
+              ? Math.min(0.88, 0.54 + artifactAmount * 0.36)
+              : Math.min(0.96, 0.58 + artifactAmount * 0.42),
+            sensitivity: darkArtifactSafeSource
+              ? Math.min(0.9, 0.42 + artifactAmount * 0.5)
+              : Math.min(1, 0.45 + artifactAmount * 0.6)
           });
-          if (artifactAmount >= 0.88) {
+          const rescueAnalysis = artifactAmount >= 0.88 ? analyzeAIGeneratedMastering(buffer) : null;
+          const needsMetallicToneCut = rescueAnalysis && (
+            (rescueAnalysis.profile?.metallicDB ?? -18) > -16.5 ||
+            (rescueAnalysis.profile?.harshDB ?? -18) > -12.5 ||
+            (rescueAnalysis.codecStress ?? 0) > 0.7
+          );
+          if (needsMetallicToneCut) {
             const rescued = applyMetallicRescueTone(buffer, {
-              amount: Math.min(1, (artifactAmount - 0.82) / 0.18),
+              amount: Math.min(0.55, (artifactAmount - 0.84) / 0.28),
               sibilanceProtection: settings.sibilanceProtection ?? 0.75,
               artifactProtection: artifactAmount,
               isLossySource: settings.isLossySource
             });
             buffer = rescued.buffer;
+          } else {
+            const recovered = applyArtifactSafeAirRecovery(buffer, {
+              amount: settings.isLossySource ? 0.55 : 1
+            });
+            buffer = recovered.buffer;
           }
         }
 
@@ -1735,6 +1759,16 @@ self.onmessage = async (e) => {
                 data[i] *= gainLin;
               }
             }
+            if (settings.truePeakLimit && desiredGainDB > gainDB + 0.25) {
+              const artifactAmount = Math.max(0, Math.min(1, settings.artifactProtection ?? 0.7));
+              const calibrated = finalizeMasteringTarget(buffer, {
+                targetLufs: safeTargetLufs,
+                ceilingDB: settings.truePeakCeiling || -1.5,
+                toleranceDB: 0.25,
+                maxLimiterPushDB: artifactAmount >= 0.9 ? 1.35 : 1.8
+              });
+              buffer = calibrated.buffer;
+            }
           } else {
             // Apply Gain (No Limiting yet, skipLimiter: true)
             buffer = normalizeToLUFS(buffer, safeTargetLufs, 0, { skipLimiter: true });
@@ -1853,7 +1887,8 @@ self.onmessage = async (e) => {
         result = {
           channels: outputChannels,
           lufs: finalLufs,
-          measuredLufs: finalLufs
+          measuredLufs: finalLufs,
+          dspRevision: DSP_RENDER_REVISION
         };
 
         sendProgress(id, 1.0, 'Complete');

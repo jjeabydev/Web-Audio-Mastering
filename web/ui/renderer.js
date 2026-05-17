@@ -19,6 +19,7 @@ import {
   analyzeAIGeneratedMastering,
   applyAIGeneratedMasteringRepair,
   applyMetallicRescueTone,
+  applyArtifactSafeAirRecovery,
   applyReferenceMatch,
   applyLimiterStressGuard,
   applyStereoStabilityGuard,
@@ -106,8 +107,9 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   const artifactSafeMode = settings.isLossySource ||
     (settings.artifactProtection ?? 0) >= 0.78 ||
     (settings.sibilanceProtection ?? 0) >= 0.75;
+  const rescueArtifactMode = (settings.artifactProtection ?? 0) >= 0.85;
   const targetLufs = artifactSafeMode
-    ? Math.min(settings.targetLufs ?? -14, -14.5)
+    ? Math.min(settings.targetLufs ?? -14, rescueArtifactMode ? -14 : -14.5)
     : settings.targetLufs;
 
   if (artifactSafeMode) {
@@ -203,13 +205,28 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
   if (artifactSafeMode) {
     console.log(`${logPrefix} Suppressing high-note piano artifacts...`);
     const artifactAmount = Math.max(0, Math.min(1, settings.artifactProtection ?? 0.7));
+    const artifactPreAnalysis = analyzeAIGeneratedMastering(renderedBuffer);
+    const darkArtifactSafeSource = !settings.isLossySource &&
+      (artifactPreAnalysis.profile?.airDB ?? -18) < -16.2 &&
+      (artifactPreAnalysis.profile?.metallicDB ?? -18) < -18 &&
+      (artifactPreAnalysis.profile?.harshDB ?? -18) < -14;
     renderedBuffer = applyPianoHighArtifactSuppressor(renderedBuffer, {
-      amount: Math.min(0.96, 0.58 + artifactAmount * 0.42),
-      sensitivity: Math.min(1, 0.45 + artifactAmount * 0.6)
+      amount: darkArtifactSafeSource
+        ? Math.min(0.88, 0.54 + artifactAmount * 0.36)
+        : Math.min(0.96, 0.58 + artifactAmount * 0.42),
+      sensitivity: darkArtifactSafeSource
+        ? Math.min(0.9, 0.42 + artifactAmount * 0.5)
+        : Math.min(1, 0.45 + artifactAmount * 0.6)
     });
-    if (artifactAmount >= 0.88) {
+    const rescueAnalysis = artifactAmount >= 0.88 ? analyzeAIGeneratedMastering(renderedBuffer) : null;
+    const needsMetallicToneCut = rescueAnalysis && (
+      (rescueAnalysis.profile?.metallicDB ?? -18) > -16.5 ||
+      (rescueAnalysis.profile?.harshDB ?? -18) > -12.5 ||
+      (rescueAnalysis.codecStress ?? 0) > 0.7
+    );
+    if (needsMetallicToneCut) {
       const rescued = applyMetallicRescueTone(renderedBuffer, {
-        amount: Math.min(1, (artifactAmount - 0.82) / 0.18),
+        amount: Math.min(0.55, (artifactAmount - 0.84) / 0.28),
         sibilanceProtection: settings.sibilanceProtection ?? 0.75,
         artifactProtection: artifactAmount,
         isLossySource: settings.isLossySource
@@ -217,6 +234,14 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
       renderedBuffer = rescued.buffer;
       if (rescued.moves) {
         console.log(`${logPrefix} Metallic rescue moves:`, rescued.moves);
+      }
+    } else {
+      const recovered = applyArtifactSafeAirRecovery(renderedBuffer, {
+        amount: settings.isLossySource ? 0.55 : 1
+      });
+      renderedBuffer = recovered.buffer;
+      if (recovered.moves && !recovered.moves.skipped) {
+        console.log(`${logPrefix} Artifact-safe air recovery moves:`, recovered.moves);
       }
     }
   }
@@ -278,6 +303,16 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
       const gainDB = Math.min(desiredGainDB, peakSafeGainDB);
       console.log(`${logPrefix} Artifact-safe gain:`, gainDB.toFixed(2), 'dB');
       renderedBuffer = applyGain(renderedBuffer, gainDB);
+      if (settings.truePeakLimit && desiredGainDB > gainDB + 0.25) {
+        const artifactAmount = Math.max(0, Math.min(1, settings.artifactProtection ?? 0.7));
+        const calibrated = finalizeMasteringTarget(renderedBuffer, {
+          targetLufs,
+          ceilingDB: settings.truePeakCeiling || -1.5,
+          toleranceDB: 0.25,
+          maxLimiterPushDB: artifactAmount >= 0.9 ? 1.35 : 1.8
+        });
+        renderedBuffer = calibrated.buffer;
+      }
     } else {
       // Apply gain only; final peak control happens in the clipper/limiter stages below.
       renderedBuffer = normalizeToLUFS(renderedBuffer, targetLufs, 0, { skipLimiter: true });

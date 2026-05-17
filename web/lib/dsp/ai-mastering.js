@@ -777,9 +777,9 @@ export function applyMetallicRescueTone(buffer, options = {}) {
   });
 
   let output = buffer;
-  const metallicCut = clamp(moves.metallicCut * (0.55 + amount * 0.35), -3.6, 0);
-  const sibilanceCut = clamp((moves.sibilanceCut + moves.harshCut * 0.45) * (0.35 + amount * 0.25), -2.4, 0);
-  const airShelf = clamp(moves.airShelf + metallicCut * 0.16 + sibilanceCut * 0.08, -1.8, 0);
+  const metallicCut = clamp(moves.metallicCut * (0.42 + amount * 0.28), -2.8, 0);
+  const sibilanceCut = clamp((moves.sibilanceCut + moves.harshCut * 0.45) * (0.28 + amount * 0.2), -1.9, 0);
+  const airShelf = clamp(moves.airShelf + metallicCut * 0.08 + sibilanceCut * 0.04, -1.1, 0.2);
 
   output = applyFilterToBuffer(output, 'peaking', 7800, sibilanceCut, 1.25);
   output = applyFilterToBuffer(output, 'peaking', 10800, metallicCut, 2.4);
@@ -793,6 +793,45 @@ export function applyMetallicRescueTone(buffer, options = {}) {
       metallicCut,
       sibilanceCut,
       airShelf
+    }
+  };
+}
+
+export function applyArtifactSafeAirRecovery(buffer, options = {}) {
+  const amount = clamp(options.amount ?? 1, 0, 1);
+  if (!buffer || amount <= 0) {
+    return { buffer, analysis: null, moves: null };
+  }
+
+  const analysis = analyzeAIGeneratedMastering(buffer);
+  const profile = analysis.profile || {};
+  const airDB = profile.airDB ?? -18;
+  const harshDB = profile.harshDB ?? -18;
+  const metallicDB = profile.metallicDB ?? -18;
+  const spikeDensity = analysis.peaks?.spikeDensity ?? 0;
+  const safeToOpen = airDB < -16.4 &&
+    harshDB < -14 &&
+    metallicDB < -18 &&
+    spikeDensity < 0.009;
+
+  if (!safeToOpen) {
+    return { buffer, analysis, moves: { airShelf: 0, presenceLift: 0, skipped: true } };
+  }
+
+  const airShelf = clamp((-15.8 - airDB) * 0.34 * amount, 0.18, 1.15);
+  const presenceLift = clamp((-14.4 - harshDB) * 0.08 * amount, 0, 0.25);
+  let output = applyFilterToBuffer(buffer, 'highshelf', 12500, airShelf, 0.65);
+  if (presenceLift > 0.02) {
+    output = applyFilterToBuffer(output, 'peaking', 4200, presenceLift, 0.9);
+  }
+
+  return {
+    buffer: output,
+    analysis,
+    moves: {
+      airShelf,
+      presenceLift,
+      skipped: false
     }
   };
 }
@@ -1047,7 +1086,7 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
   const limiterRisk = analysis.limiterRisk ?? 0;
 
   const percussiveArtifactRisk = isLossy || fragileHighs || metallicDB > -14.5 || analysis.codecStress > 0.32;
-  const pianoHighArtifactRisk = (
+  const artifactRescueRisk = (
     isLossy &&
     (
       metallicDB > -15.5 ||
@@ -1060,7 +1099,9 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
   ) || metallicDB > -12.5 || analysis.codecStress > 0.58 || (peaks.spikeDensity ?? 0) > 0.00005;
 
   let targetLufs = -12;
-  if (pianoHighArtifactRisk || percussiveArtifactRisk) {
+  if (artifactRescueRisk) {
+    targetLufs = -14;
+  } else if (percussiveArtifactRisk) {
     targetLufs = -14.5;
   } else if (clippedOrPinned || limiterRisk > 0.58 || lowBitrate || peaks.loudestCrestDB < 6.5) {
     targetLufs = -14;
@@ -1093,7 +1134,7 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
     1.12
   );
 
-  const sibilanceProtection = clamp(
+  let sibilanceProtection = clamp(
     0.62 +
     Math.max(0, harshDB + 14) * 0.035 +
     Math.max(0, metallicDB + 16) * 0.018 +
@@ -1101,6 +1142,9 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
     0.55,
     0.9
   );
+  if (artifactRescueRisk) {
+    sibilanceProtection = Math.max(sibilanceProtection, 0.8);
+  }
 
   let artifactProtection = clamp(
     0.7 +
@@ -1110,12 +1154,12 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
     0.65,
     0.92
   );
-  if (pianoHighArtifactRisk) {
-    artifactProtection = Math.max(artifactProtection, 0.85);
+  if (artifactRescueRisk) {
+    artifactProtection = Math.max(artifactProtection, 0.9);
   }
-  artifactProtection = Math.min(artifactProtection, 0.85);
+  artifactProtection = Math.min(artifactProtection, artifactRescueRisk ? 0.9 : 0.85);
 
-  const limiterCharacter = (lowBitrate || pianoHighArtifactRisk || clippedOrPinned || fragileHighs || limiterRisk > 0.5)
+  const limiterCharacter = (lowBitrate || artifactRescueRisk || clippedOrPinned || fragileHighs || limiterRisk > 0.5)
     ? 'transparent'
     : (profile.name === 'punchy' && (peaks.loudestCrestDB ?? 0) > 9.5 ? 'punch' : 'balanced');
 
@@ -1159,7 +1203,8 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
       fragileHighs,
       subToBassDB,
       percussiveArtifactRisk,
-      pianoHighArtifactRisk
+      artifactRescueRisk,
+      pianoHighArtifactRisk: artifactRescueRisk
     }
   };
 }

@@ -1,5 +1,5 @@
 // Import DSP Worker Interface
-import { initDSPWorker, getDSPWorker } from './workers/worker-interface.js';
+import { DSP_RENDER_REVISION, initDSPWorker, getDSPWorker } from './workers/worker-interface.js';
 
 // Import DSP modules
 import {
@@ -1384,7 +1384,11 @@ async function loadAudioFile(file) {
     }, { force: true });
 
     const isLossySource = /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(file.name);
-    const normalizedTarget = isLossySource ? Math.min(targetLufsDb, -14.5) : targetLufsDb;
+    const requestedTarget = Number.parseFloat(targetLufsSlider.value);
+    const rescuePreviewMode = Number(artifactProtection?.value || 0) >= 85;
+    const normalizedTarget = isLossySource
+      ? Math.min(Number.isFinite(requestedTarget) ? requestedTarget : targetLufsDb, rescuePreviewMode ? -14 : -14.5)
+      : (Number.isFinite(requestedTarget) ? requestedTarget : targetLufsDb);
     let normalizedBuffer;
     if (isLossySource) {
       const desiredGainDB = Number.isFinite(originalLufs) ? normalizedTarget - originalLufs : 0;
@@ -2131,6 +2135,15 @@ async function processAudio() {
         if (processingCancelled) {
           throw new Error('Cancelled');
         }
+        if (result.staleWorker) {
+          console.warn('[Export] DSP worker revision mismatch:', {
+            expected: DSP_RENDER_REVISION,
+            actual: result.dspRevision || 'missing'
+          });
+          showToast('DSP worker가 오래된 상태입니다. 페이지를 새로고침한 뒤 다시 Export 해주세요.', 'error', 6500);
+        } else {
+          console.log('[Export] DSP worker revision:', result.dspRevision);
+        }
 
         const needsResample = result.audioBuffer.sampleRate !== parsedSampleRate;
         let exportBuffer = result.audioBuffer;
@@ -2631,7 +2644,7 @@ const AI_MODE_DEFAULTS = {
     artifactProtection: 95,
     inputGain: -5.5,
     truePeakCeiling: -1.5,
-    targetLufs: -15,
+    targetLufs: -14,
     limiterCharacter: 'transparent',
     addPunch: false,
     tapeWarmth: false,
@@ -2732,7 +2745,7 @@ function refineModeDefaultsForCurrentSource(defaults) {
     refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
     refined.sibilanceProtection = Math.max(refined.sibilanceProtection ?? 65, 75);
     refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 80);
-    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -14.5);
+    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -14);
     refined.limiterCharacter = 'transparent';
     refined.addAir = false;
     refined.addPunch = false;
@@ -2760,7 +2773,7 @@ function refineModeDefaultsForCurrentSource(defaults) {
     codecStress > 0.32 ||
     (profile.metallicDB ?? -18) > -14.5 ||
     (profile.harshDB ?? -18) > -11.5;
-  const pianoHighArtifactRisk = (
+  const artifactRescueRisk = (
     isLossy &&
     (
       (profile.metallicDB ?? -18) > -15.5 ||
@@ -2775,7 +2788,7 @@ function refineModeDefaultsForCurrentSource(defaults) {
   if (clippedOrPinned || limiterRisk > 0.55 || (peaks.loudestCrestDB ?? 12) < 6.5) {
     refined.inputGain = Math.min(refined.inputGain ?? -3.5, -5.5);
     refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
-    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -14.5);
+    refined.targetLufs = -14;
     refined.limiterCharacter = 'transparent';
     refined.addPunch = false;
     refined.tapeWarmth = false;
@@ -2803,7 +2816,7 @@ function refineModeDefaultsForCurrentSource(defaults) {
     refined.aiIntensity = Math.min(refined.aiIntensity ?? 100, 100);
     refined.sibilanceProtection = Math.max(refined.sibilanceProtection ?? 65, 78);
     refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 82);
-    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -14.5);
+    refined.targetLufs = -14;
     refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
     refined.limiterCharacter = 'transparent';
     refined.addAir = false;
@@ -2812,11 +2825,11 @@ function refineModeDefaultsForCurrentSource(defaults) {
     refined.glueCompression = false;
   }
 
-  if (pianoHighArtifactRisk) {
+  if (artifactRescueRisk) {
     refined.aiIntensity = Math.min(refined.aiIntensity ?? 100, 95);
     refined.sibilanceProtection = Math.max(refined.sibilanceProtection ?? 65, 80);
-    refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 85);
-    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -14.5);
+    refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 90);
+    refined.targetLufs = -14;
     refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
     refined.limiterCharacter = 'transparent';
     refined.addAir = false;
@@ -2964,7 +2977,7 @@ function getArtifactSafeRecommendation(analysis, source = {}) {
     artifactProtection: Math.max(base.artifactProtection ?? 80, rescueBoost > 0.45 ? 95 : 90),
     inputGain: Math.min(base.inputGain ?? -3.5, -5.5),
     truePeakCeiling: Math.min(base.truePeakCeiling ?? -1, -1.5),
-    targetLufs: Math.min(base.targetLufs ?? -12, -15),
+    targetLufs: Math.min(base.targetLufs ?? -12, -14),
     limiterCharacter: 'transparent',
     addPunch: false,
     tapeWarmth: false,
@@ -3362,7 +3375,8 @@ async function renormalizeAudio(newTargetLufs) {
       const currentPeak = Number.isFinite(fileState.originalTruePeak)
         ? fileState.originalTruePeak
         : findTruePeak(fileState.originalBuffer);
-      const safeTarget = Math.min(newTargetLufs, -14.5);
+      const rescuePreviewMode = Number(artifactProtection?.value || 0) >= 85;
+      const safeTarget = Math.min(newTargetLufs, rescuePreviewMode ? -14 : -14.5);
       const desiredGainDB = Number.isFinite(currentLufs) ? safeTarget - currentLufs : 0;
       const peakSafeGainDB = -1.8 - currentPeak;
       normalizedBuffer = applyGain(fileState.originalBuffer, Math.min(desiredGainDB, peakSafeGainDB));

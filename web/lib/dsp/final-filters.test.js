@@ -93,7 +93,7 @@ describe('adaptive final filters', () => {
     expect(options.lowpassFreq).toBeGreaterThanOrEqual(18500);
   });
 
-  it('lets metallic protection 90 add slightly stronger ultrasonic cleanup', () => {
+  it('keeps metallic protection 90 open enough to avoid a muffled master', () => {
     const options = getAdaptiveFinalFilterOptions(null, {
       isLossySource: true,
       artifactProtection: 0.9,
@@ -101,7 +101,29 @@ describe('adaptive final filters', () => {
     });
 
     expect(options.lowpass).toBe(true);
-    expect(options.lowpassFreq).toBe(18000);
+    expect(options.lowpassFreq).toBe(18500);
+  });
+
+  it('keeps wav artifact rescue masters more open than lossy cleanup', () => {
+    const options = getAdaptiveFinalFilterOptions(null, {
+      isLossySource: false,
+      artifactProtection: 0.85,
+      sibilanceProtection: 0.8
+    });
+
+    expect(options.lowpass).toBe(true);
+    expect(options.lowpassFreq).toBe(20500);
+  });
+
+  it('keeps wav artifact rescue masters open even at protection 90', () => {
+    const options = getAdaptiveFinalFilterOptions(null, {
+      isLossySource: false,
+      artifactProtection: 0.9,
+      sibilanceProtection: 0.8
+    });
+
+    expect(options.lowpass).toBe(true);
+    expect(options.lowpassFreq).toBe(20500);
   });
 
   it('preserves more high-frequency air with the open setting', () => {

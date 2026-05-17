@@ -7,6 +7,7 @@ import {
   applyStereoStabilityGuard,
   applyPianoHighArtifactSuppressor,
   applyMetallicRescueTone,
+  applyArtifactSafeAirRecovery,
   chooseAIMasteringProfile,
   getAIMasteringRecommendation,
   finalizeMasteringTarget
@@ -266,6 +267,7 @@ describe('AI-generated mastering repair', () => {
     const recommendation = getAIMasteringRecommendation(analysis, { isLossy: false });
 
     expect(analysis.peaks.spikeDensity).toBeGreaterThan(0);
+    expect(recommendation.reasons.artifactRescueRisk).toBe(true);
     expect(recommendation.reasons.pianoHighArtifactRisk).toBe(true);
     expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(85);
   });
@@ -528,16 +530,17 @@ describe('AI-generated mastering repair', () => {
       { bitrateKbps: 192, isLossy: true }
     );
 
-    expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(85);
-    expect(recommendation.artifactProtection).toBeLessThan(90);
+    expect(recommendation.artifactProtection).toBe(90);
+    expect(recommendation.sibilanceProtection).toBeGreaterThanOrEqual(80);
     expect(recommendation.truePeakCeiling).toBeLessThanOrEqual(-1.5);
-    expect(recommendation.targetLufs).toBeLessThanOrEqual(-14.5);
+    expect(recommendation.targetLufs).toBe(-14);
     expect(recommendation.limiterCharacter).toBe('transparent');
     expect(recommendation.addAir).toBe(false);
+    expect(recommendation.reasons.artifactRescueRisk).toBe(true);
     expect(recommendation.reasons.pianoHighArtifactRisk).toBe(true);
   });
 
-  it('keeps clean lossy sources below manual metallic rescue strength', () => {
+  it('allows lossy rescue sources to reach metallic rescue strength', () => {
     const buffer = makeToneBuffer({
       frequencies: [
         [120, 0.1],
@@ -551,12 +554,11 @@ describe('AI-generated mastering repair', () => {
       { bitrateKbps: 256, isLossy: true }
     );
 
-    expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(75);
-    expect(recommendation.artifactProtection).toBeLessThan(90);
+    expect(recommendation.artifactProtection).toBeLessThanOrEqual(90);
     expect(recommendation.addAir).toBe(false);
   });
 
-  it('can raise protection for wav sources when analysis shows piano-like high artifact risk', () => {
+  it('can raise protection for wav sources when analysis shows high artifact rescue risk', () => {
     const buffer = makeToneBuffer({
       frequencies: [
         [880, 0.12],
@@ -570,8 +572,9 @@ describe('AI-generated mastering repair', () => {
       { isLossy: false }
     );
 
-    expect(recommendation.artifactProtection).toBeGreaterThanOrEqual(85);
-    expect(recommendation.artifactProtection).toBeLessThan(90);
+    expect(recommendation.artifactProtection).toBe(90);
+    expect(recommendation.sibilanceProtection).toBeGreaterThanOrEqual(80);
+    expect(recommendation.reasons.artifactRescueRisk).toBe(true);
     expect(recommendation.reasons.pianoHighArtifactRisk).toBe(true);
   });
 
@@ -787,5 +790,31 @@ describe('AI-generated mastering repair', () => {
     const after = repaired.getChannelData(0);
 
     expect(rmsDiff(before, after)).toBeLessThan(0.003);
+  });
+
+  it('adds gentle air recovery only when artifact-safe audio is dark and not metallic', () => {
+    const darkSafe = makeToneBuffer({
+      frequencies: [
+        [180, 0.1],
+        [900, 0.08],
+        [4200, 0.015],
+        [12500, 0.004]
+      ]
+    });
+    const brightMetallic = makeToneBuffer({
+      frequencies: [
+        [180, 0.1],
+        [900, 0.08],
+        [7800, 0.08],
+        [10800, 0.14]
+      ]
+    });
+
+    const recovered = applyArtifactSafeAirRecovery(darkSafe, { amount: 1 });
+    const skipped = applyArtifactSafeAirRecovery(brightMetallic, { amount: 1 });
+
+    expect(recovered.moves.skipped).toBe(false);
+    expect(recovered.moves.airShelf).toBeGreaterThan(0);
+    expect(skipped.moves.skipped).toBe(true);
   });
 });
