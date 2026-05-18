@@ -13,6 +13,7 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "start": "vite",
+    "start:app": "npm run build:web && electron .",
     "dev": "vite",
     "build:web": "vite build",
     "build": "vite build && electron-builder",

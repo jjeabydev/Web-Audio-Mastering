@@ -201,7 +201,7 @@ function printSummary(item) {
 
 const sampleDir = path.resolve('sample');
 const wamFiles = fs.readdirSync(sampleDir)
-  .filter(file => /^BURN THE BRIDGE_wam(?: - #\d+)?\.wav$/i.test(file))
+  .filter(file => /^BURN THE BRIDGE_wam(?: - #\d+(?:_[^.]+)?)?\.wav$/i.test(file))
   .sort((a, b) => {
     const getTake = (name) => Number(name.match(/#(\d+)/)?.[1] || 1);
     return getTake(a) - getTake(b);
@@ -231,13 +231,25 @@ const results = files.map(([label, file]) => summarize(label, file));
 for (const result of results) printSummary(result);
 
 const bandlab = results.find(item => item.label === 'BandLab');
-for (const wam of results.filter(item => item.label.startsWith('WAM'))) {
-  console.log(`\n## ${wam.label} vs BandLab`);
-  console.log(`LUFS delta: ${round(wam.lufs - bandlab.lufs)} dB`);
-  console.log(`truePeak delta: ${round(wam.truePeak - bandlab.truePeak)} dB`);
-  console.log(`metallic delta: ${round(wam.analysis.profile.metallicDB - bandlab.analysis.profile.metallicDB)} dB`);
-  console.log(`harsh delta: ${round(wam.analysis.profile.harshDB - bandlab.analysis.profile.harshDB)} dB`);
-  console.log(`air delta: ${round(wam.analysis.profile.airDB - bandlab.analysis.profile.airDB)} dB`);
-  console.log(`spikeDensity delta: ${round(wam.analysis.peaks.spikeDensity - bandlab.analysis.peaks.spikeDensity, 6)}`);
-  console.log(`avgResidual delta: ${round(wam.analysis.peaks.avgSpikeResidual - bandlab.analysis.peaks.avgSpikeResidual, 6)}`);
+const wamResults = results.filter(item => item.label.startsWith('WAM'));
+
+function printDelta(title, current, reference) {
+  console.log(`\n## ${title}`);
+  console.log(`LUFS delta: ${round(current.lufs - reference.lufs)} dB`);
+  console.log(`truePeak delta: ${round(current.truePeak - reference.truePeak)} dB`);
+  console.log(`metallic delta: ${round(current.analysis.profile.metallicDB - reference.analysis.profile.metallicDB)} dB`);
+  console.log(`harsh delta: ${round(current.analysis.profile.harshDB - reference.analysis.profile.harshDB)} dB`);
+  console.log(`air delta: ${round(current.analysis.profile.airDB - reference.analysis.profile.airDB)} dB`);
+  console.log(`spikeDensity delta: ${round(current.analysis.peaks.spikeDensity - reference.analysis.peaks.spikeDensity, 6)}`);
+  console.log(`avgResidual delta: ${round(current.analysis.peaks.avgSpikeResidual - reference.analysis.peaks.avgSpikeResidual, 6)}`);
+}
+
+for (const wam of wamResults) {
+  printDelta(`${wam.label} vs BandLab`, wam, bandlab);
+}
+
+const latestWam = wamResults[wamResults.length - 1];
+const previousWam = wamResults[wamResults.length - 2];
+if (latestWam && previousWam) {
+  printDelta(`Latest ${latestWam.label} vs Previous ${previousWam.label}`, latestWam, previousWam);
 }

@@ -59,6 +59,11 @@ import {
   showOriginalWaveform
 } from './ui/index.js';
 
+if (typeof window !== 'undefined') {
+  window.__WAM_DSP_RENDER_REVISION = DSP_RENDER_REVISION;
+}
+console.info('[Runtime] DSP render revision:', DSP_RENDER_REVISION);
+
 let currentFile = null; // Store the currently selected File object (browser)
 
 
@@ -161,6 +166,7 @@ const cancelBtn = document.getElementById('cancelBtn');
 const progressContainer = document.getElementById('progressContainer');
 const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
+const runtimeRevision = document.getElementById('runtimeRevision');
 const statusMessage = document.getElementById('statusMessage');
 const seekBar = document.getElementById('seekBar');
 const playBtn = document.getElementById('playBtn');
@@ -168,6 +174,15 @@ const stopBtn = document.getElementById('stopBtn');
 const bypassBtn = document.getElementById('bypassBtn');
 const peakL = document.getElementById('peakL');
 const peakR = document.getElementById('peakR');
+
+function formatRevisionLabel(revision) {
+  return String(revision || 'unknown').replace(/^\d{4}-\d{2}-\d{2}-/, '');
+}
+
+if (runtimeRevision) {
+  runtimeRevision.textContent = `DSP ${formatRevisionLabel(DSP_RENDER_REVISION)}`;
+  runtimeRevision.title = `Runtime DSP revision: ${DSP_RENDER_REVISION}`;
+}
 
 // Toast helper with auto-clear
 let toastTimeout = null;
@@ -2114,6 +2129,13 @@ async function processAudio() {
 
     let outputData;
     let exportStats = null;
+    let exportRenderSource = 'main-thread';
+    let exportRevision = 'main-thread';
+    let exportChainDebug = null;
+    let exportManifest = null;
+    const settingsSummary = summarizeExportSettings(settings);
+    const settingsFingerprint = hashString(stableStringify(settingsSummary));
+    console.log('[Export] Settings fingerprint:', settingsFingerprint, settingsSummary);
 
     // Hybrid Pipeline: Cached buffer is preview-only (missing EQ/Comp).
     // ALWAYS render full chain for export to ensure parity.
@@ -2124,6 +2146,7 @@ async function processAudio() {
     if (dspWorker && dspWorker.isReady) {
       // Use Worker (Preferred), but fall back to main thread if it fails so export is never blocked.
       try {
+        await dspWorker.restart();
         const result = await dspWorker.renderFullChain(
           fileState.originalBuffer,
           settings,
@@ -2140,10 +2163,17 @@ async function processAudio() {
             expected: DSP_RENDER_REVISION,
             actual: result.dspRevision || 'missing'
           });
-          showToast('DSP worker가 오래된 상태입니다. 페이지를 새로고침한 뒤 다시 Export 해주세요.', 'error', 6500);
+          dspWorker.terminate();
+          showToast('DSP worker가 오래된 상태라 메인 렌더러로 다시 Export 합니다.', 'error', 6500);
+          const staleError = new Error('Stale DSP worker');
+          staleError.staleWorker = true;
+          throw staleError;
         } else {
           console.log('[Export] DSP worker revision:', result.dspRevision);
         }
+        exportRenderSource = 'worker';
+        exportRevision = result.dspRevision || 'unknown-worker';
+        exportChainDebug = result.chainDebug || null;
 
         const needsResample = result.audioBuffer.sampleRate !== parsedSampleRate;
         let exportBuffer = result.audioBuffer;
@@ -2175,6 +2205,8 @@ async function processAudio() {
           throw workerErr;
         }
         console.warn('[Export] Worker render failed, falling back to main thread render:', workerErr);
+        exportRenderSource = workerErr?.staleWorker ? 'main-thread-after-stale-worker' : 'main-thread-after-worker-error';
+        exportRevision = DSP_RENDER_REVISION;
         outputData = await renderOffline(fileState.originalBuffer, settings, updateProgress, {
           shouldCancel: () => processingCancelled,
           onRenderedBuffer: (buffer) => {
@@ -2185,6 +2217,8 @@ async function processAudio() {
       }
     } else {
       // Fallback (Main Thread)
+      exportRenderSource = 'main-thread-no-worker';
+      exportRevision = DSP_RENDER_REVISION;
       outputData = await renderOffline(fileState.originalBuffer, settings, updateProgress, {
         shouldCancel: () => processingCancelled,
         onRenderedBuffer: (buffer) => {
@@ -2204,11 +2238,26 @@ async function processAudio() {
     // Create blob from WAV data
     const blob = new Blob([outputData], { type: 'audio/wav' });
     const url = URL.createObjectURL(blob);
+    const outputHash = await hashExportBytes(outputData);
+    exportManifest = {
+      renderSource: exportRenderSource,
+      revision: exportRevision,
+      settingsFingerprint,
+      outputHash,
+      bytes: outputData?.length || outputData?.byteLength || 0,
+      stats: exportStats,
+      chainDebug: exportChainDebug
+    };
+    console.log('[Export] Render manifest:', exportManifest);
 
-    // Generate output filename from input file
-    const inputName = currentFile?.name || 'audio';
-    const baseName = inputName.replace(/\.[^.]+$/, '');
-    const outputName = `${baseName}_mastered.wav`;
+    // Generate a unique output filename so repeated exports cannot be confused
+    // with an older browser download.
+    const outputName = createExportFileName(currentFile?.name, {
+      revision: exportRevision,
+      settingsFingerprint,
+      outputHash
+    });
+    console.log('[Export] Download filename:', outputName);
 
     // Create download link and trigger download
     const a = document.createElement('a');
@@ -2224,7 +2273,7 @@ async function processAudio() {
     showLoadingModal('Complete!', 100, false);
     setTimeout(() => {
       hideLoadingModal();
-      showToast(formatExportCompleteMessage(exportStats), 'success', exportStats ? 5200 : 3500);
+      showToast(formatExportCompleteMessage(exportStats, exportManifest), 'success', exportStats ? 6500 : 3500);
     }, 300);
 
   } catch (error) {
@@ -2246,6 +2295,116 @@ function resolveExportSampleRate() {
     return Math.max(44100, Math.round(fileState.originalSampleRate));
   }
   return parseInt(sampleRate.value) || 44100;
+}
+
+function formatExportTimestamp(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join('') + '-' + [
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds())
+  ].join('');
+}
+
+function createExportFileName(inputName, manifest = {}) {
+  const baseName = (inputName || 'audio')
+    .replace(/\.[^.]+$/, '')
+    .replace(/[\\/:*?"<>|]+/g, '_')
+    .trim() || 'audio';
+  const revision = String(manifest.revision || DSP_RENDER_REVISION)
+    .replace(/^\d{4}-\d{2}-\d{2}-/, '')
+    .replace(/[^a-z0-9-]+/gi, '')
+    .slice(0, 36);
+  const settings = String(manifest.settingsFingerprint || '').replace(/[^a-f0-9]/gi, '').slice(0, 8);
+  const output = String(manifest.outputHash || '').replace(/[^a-f0-9]/gi, '').slice(0, 12);
+  const suffix = [
+    revision && `rev-${revision}`,
+    settings && `set-${settings}`,
+    output && `sha-${output}`
+  ].filter(Boolean).join('_');
+  return `${baseName}_wam_${formatExportTimestamp()}${suffix ? `_${suffix}` : ''}.wav`;
+}
+
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+}
+
+function hashString(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function summarizeExportSettings(settings) {
+  return {
+    aiEnhance: settings.aiEnhance,
+    aiProfile: settings.aiProfile,
+    aiIntensity: settings.aiIntensity,
+    artifactProtection: settings.artifactProtection,
+    sibilanceProtection: settings.sibilanceProtection,
+    targetLufs: settings.targetLufs,
+    inputGain: settings.inputGain,
+    truePeakLimit: settings.truePeakLimit,
+    truePeakCeiling: settings.truePeakCeiling,
+    limiterCharacter: settings.limiterCharacter,
+    normalizeLoudness: settings.normalizeLoudness,
+    addAir: settings.addAir,
+    addPunch: settings.addPunch,
+    tapeWarmth: settings.tapeWarmth,
+    cutMud: settings.cutMud,
+    deharsh: settings.deharsh,
+    autoLevel: settings.autoLevel,
+    cleanLowEnd: settings.cleanLowEnd,
+    glueCompression: settings.glueCompression,
+    centerBass: settings.centerBass,
+    stereoWidth: settings.stereoWidth,
+    referenceMatch: settings.referenceMatch,
+    referenceAmount: settings.referenceAmount,
+    isLossySource: settings.isLossySource,
+    sampleRate: settings.sampleRate,
+    bitDepth: settings.bitDepth,
+    ditherMode: settings.ditherMode,
+    eqLow: settings.eqLow,
+    eqLowMid: settings.eqLowMid,
+    eqMid: settings.eqMid,
+    eqHighMid: settings.eqHighMid,
+    eqHigh: settings.eqHigh
+  };
+}
+
+async function hashExportBytes(bytes) {
+  if (!bytes || !Number.isFinite(bytes.length)) return '';
+  if (globalThis.crypto?.subtle) {
+    const view = bytes instanceof Uint8Array
+      ? bytes
+      : new Uint8Array(bytes.buffer || bytes, bytes.byteOffset || 0, bytes.byteLength || bytes.length);
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', view);
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+  let hash = 2166136261;
+  const length = bytes.length;
+  for (let i = 0; i < length; i++) {
+    hash ^= bytes[i];
+    hash = Math.imul(hash, 16777619);
+  }
+  hash ^= length & 0xff;
+  hash = Math.imul(hash, 16777619);
+  hash ^= (length >>> 8) & 0xff;
+  hash = Math.imul(hash, 16777619);
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
 function formatSampleRateLabel(rate) {
@@ -2298,9 +2457,12 @@ function clearExportQualitySummary() {
   }
 }
 
-function formatExportCompleteMessage(stats) {
-  if (!stats) return '✓ Export complete! Your mastered file is downloading.';
-  return `✓ Export complete: ${stats.lufs.toFixed(1)} LUFS, ${stats.truePeak.toFixed(2)} dBTP, ${formatSampleRateLabel(stats.sampleRate)} / ${stats.bitDepth}-bit WAV.`;
+function formatExportCompleteMessage(stats, manifest = null) {
+  const trace = manifest
+    ? ` DSP ${formatRevisionLabel(manifest.revision)}, set ${String(manifest.settingsFingerprint || '').slice(0, 8)}, sha ${String(manifest.outputHash || '').slice(0, 12)}.`
+    : '';
+  if (!stats) return `✓ Export complete! Your mastered file is downloading.${trace}`;
+  return `✓ Export complete: ${stats.lufs.toFixed(1)} LUFS, ${stats.truePeak.toFixed(2)} dBTP, ${formatSampleRateLabel(stats.sampleRate)} / ${stats.bitDepth}-bit WAV.${trace}`;
 }
 
 function ensureExportBufferSafety(buffer, settings) {

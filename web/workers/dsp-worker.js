@@ -8,7 +8,7 @@
  * - Progress: { id: number, type: 'PROGRESS', progress: number, status: string }
  */
 
-const DSP_RENDER_REVISION = '2026-05-17-artifact-safe-air-recovery-v2';
+const DSP_RENDER_REVISION = '2026-05-18-artifact-safe-commercial-open-v8';
 
 // Import DSP modules
 import {
@@ -1504,9 +1504,21 @@ self.onmessage = async (e) => {
           (settings.artifactProtection ?? 0) >= 0.78 ||
           (settings.sibilanceProtection ?? 0) >= 0.75;
         const rescueArtifactMode = (settings.artifactProtection ?? 0) >= 0.85;
+        const requestedTargetLufs = settings.targetLufs ?? -14;
         const safeTargetLufs = artifactSafeMode
-          ? Math.min(settings.targetLufs ?? -14, rescueArtifactMode ? -14 : -14.5)
+          ? Math.min(
+            Math.max(requestedTargetLufs, settings.isLossySource ? -13.6 : -13.0),
+            rescueArtifactMode ? -12.9 : -13.1
+          )
           : settings.targetLufs;
+        const chainDebug = {
+          revision: DSP_RENDER_REVISION,
+          mode,
+          artifactSafeMode,
+          rescueArtifactMode,
+          safeTargetLufs,
+          artifactRepair: null
+        };
 
         // --- HEAVY FX (Shared) ---
 
@@ -1611,6 +1623,13 @@ self.onmessage = async (e) => {
             (artifactPreAnalysis.profile?.airDB ?? -18) < -16.2 &&
             (artifactPreAnalysis.profile?.metallicDB ?? -18) < -18 &&
             (artifactPreAnalysis.profile?.harshDB ?? -18) < -14;
+          chainDebug.artifactRepair = {
+            artifactAmount,
+            darkArtifactSafeSource,
+            preAirDB: artifactPreAnalysis.profile?.airDB ?? null,
+            preHarshDB: artifactPreAnalysis.profile?.harshDB ?? null,
+            preMetallicDB: artifactPreAnalysis.profile?.metallicDB ?? null
+          };
           buffer = applyPianoHighArtifactSuppressor(buffer, {
             amount: darkArtifactSafeSource
               ? Math.min(0.88, 0.54 + artifactAmount * 0.36)
@@ -1625,6 +1644,13 @@ self.onmessage = async (e) => {
             (rescueAnalysis.profile?.harshDB ?? -18) > -12.5 ||
             (rescueAnalysis.codecStress ?? 0) > 0.7
           );
+          Object.assign(chainDebug.artifactRepair, {
+            postSuppressAirDB: rescueAnalysis?.profile?.airDB ?? null,
+            postSuppressHarshDB: rescueAnalysis?.profile?.harshDB ?? null,
+            postSuppressMetallicDB: rescueAnalysis?.profile?.metallicDB ?? null,
+            postSuppressCodecStress: rescueAnalysis?.codecStress ?? null,
+            needsMetallicToneCut: Boolean(needsMetallicToneCut)
+          });
           if (needsMetallicToneCut) {
             const rescued = applyMetallicRescueTone(buffer, {
               amount: Math.min(0.55, (artifactAmount - 0.84) / 0.28),
@@ -1633,11 +1659,22 @@ self.onmessage = async (e) => {
               isLossySource: settings.isLossySource
             });
             buffer = rescued.buffer;
+            const recovered = applyArtifactSafeAirRecovery(buffer, {
+              amount: settings.isLossySource ? 0.35 : 0.75
+            });
+            buffer = recovered.buffer;
+            chainDebug.artifactRepair.branch = 'metallic-tone-cut';
+            chainDebug.artifactRepair.moves = {
+              metallic: rescued.moves || null,
+              airRecovery: recovered.moves || null
+            };
           } else {
             const recovered = applyArtifactSafeAirRecovery(buffer, {
               amount: settings.isLossySource ? 0.55 : 1
             });
             buffer = recovered.buffer;
+            chainDebug.artifactRepair.branch = 'air-recovery';
+            chainDebug.artifactRepair.moves = recovered.moves || null;
           }
         }
 
@@ -1775,6 +1812,17 @@ self.onmessage = async (e) => {
           }
         }
 
+        if (artifactSafeMode) {
+          sendProgress(id, 0.80, 'Opening safe master air...');
+          const polished = applyArtifactSafeAirRecovery(buffer, {
+            amount: settings.isLossySource ? 0.45 : 0.95
+          });
+          buffer = polished.buffer;
+          if (chainDebug.artifactRepair) {
+            chainDebug.artifactRepair.finalAirRecovery = polished.moves || null;
+          }
+        }
+
         if (settings.truePeakLimit && settings.aiEnhance !== false && !artifactSafeMode) {
           sendProgress(id, 0.82, 'Protecting limiter clarity...');
           const limiterCharacter = settings.limiterCharacter || 'balanced';
@@ -1888,7 +1936,8 @@ self.onmessage = async (e) => {
           channels: outputChannels,
           lufs: finalLufs,
           measuredLufs: finalLufs,
-          dspRevision: DSP_RENDER_REVISION
+          dspRevision: DSP_RENDER_REVISION,
+          chainDebug
         };
 
         sendProgress(id, 1.0, 'Complete');

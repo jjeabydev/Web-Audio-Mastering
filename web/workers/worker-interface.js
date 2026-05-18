@@ -8,7 +8,7 @@
  *   const { channels } = await dspWorker.normalize(audioBuffer, -14, -1, onProgress);
  */
 
-export const DSP_RENDER_REVISION = '2026-05-17-artifact-safe-air-recovery-v2';
+export const DSP_RENDER_REVISION = '2026-05-18-artifact-safe-commercial-open-v8';
 
 export class DSPWorkerInterface {
   constructor() {
@@ -27,9 +27,13 @@ export class DSPWorkerInterface {
 
     return new Promise((resolve, reject) => {
       try {
-        // Use import.meta.url for proper module worker resolution with Vite
+        // Use a fresh URL so export cannot reuse a stale worker instance after
+        // DSP changes during development.
+        const workerUrl = new URL('./dsp-worker.js', import.meta.url);
+        workerUrl.searchParams.set('rev', DSP_RENDER_REVISION);
+        workerUrl.searchParams.set('fresh', String(Date.now()));
         this.worker = new Worker(
-          new URL('./dsp-worker.js', import.meta.url),
+          workerUrl,
           { type: 'module' }
         );
 
@@ -51,6 +55,14 @@ export class DSPWorkerInterface {
         reject(error);
       }
     });
+  }
+
+  /**
+   * Recreate the worker so long export renders use the latest DSP module graph.
+   */
+  async restart() {
+    this.terminate();
+    await this.init();
   }
 
   /**
@@ -276,7 +288,8 @@ export class DSPWorkerInterface {
       lufs: result.lufs,
       measuredLufs: result.measuredLufs,
       dspRevision: result.dspRevision,
-      staleWorker: result.dspRevision !== DSP_RENDER_REVISION
+      staleWorker: result.dspRevision !== DSP_RENDER_REVISION,
+      chainDebug: result.chainDebug || null
     };
   }
 

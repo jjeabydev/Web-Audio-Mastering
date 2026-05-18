@@ -113,6 +113,24 @@ body {
   gap: 12px;
 }
 
+.logo-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.runtime-revision {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.1;
+  letter-spacing: 0;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .logo-icon {
   display: flex;
   align-items: center;

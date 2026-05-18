@@ -108,8 +108,12 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     (settings.artifactProtection ?? 0) >= 0.78 ||
     (settings.sibilanceProtection ?? 0) >= 0.75;
   const rescueArtifactMode = (settings.artifactProtection ?? 0) >= 0.85;
+  const requestedTargetLufs = settings.targetLufs ?? -14;
   const targetLufs = artifactSafeMode
-    ? Math.min(settings.targetLufs ?? -14, rescueArtifactMode ? -14 : -14.5)
+    ? Math.min(
+      Math.max(requestedTargetLufs, settings.isLossySource ? -13.6 : -13.0),
+      rescueArtifactMode ? -12.9 : -13.1
+    )
     : settings.targetLufs;
 
   if (artifactSafeMode) {
@@ -232,8 +236,15 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
         isLossySource: settings.isLossySource
       });
       renderedBuffer = rescued.buffer;
+      const recovered = applyArtifactSafeAirRecovery(renderedBuffer, {
+        amount: settings.isLossySource ? 0.35 : 0.75
+      });
+      renderedBuffer = recovered.buffer;
       if (rescued.moves) {
         console.log(`${logPrefix} Metallic rescue moves:`, rescued.moves);
+      }
+      if (recovered.moves && !recovered.moves.skipped) {
+        console.log(`${logPrefix} Post-metallic air recovery moves:`, recovered.moves);
       }
     } else {
       const recovered = applyArtifactSafeAirRecovery(renderedBuffer, {
@@ -319,6 +330,16 @@ function applyDSPChain(buffer, settings, onProgress = null, logPrefix = '[DSP]')
     }
   }
   if (onProgress) onProgress(0.75);
+
+  if (artifactSafeMode) {
+    const polished = applyArtifactSafeAirRecovery(renderedBuffer, {
+      amount: settings.isLossySource ? 0.45 : 0.95
+    });
+    renderedBuffer = polished.buffer;
+    if (polished.moves && !polished.moves.skipped) {
+      console.log(`${logPrefix} Final artifact-safe air polish moves:`, polished.moves);
+    }
+  }
 
   if (settings.truePeakLimit && settings.aiEnhance !== false && !artifactSafeMode) {
     console.log(`${logPrefix} Applying limiter stress guard...`);

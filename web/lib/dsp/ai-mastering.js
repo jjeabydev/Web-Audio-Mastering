@@ -237,6 +237,24 @@ function applyFilterToBuffer(buffer, type, frequency, gainDB = 0, Q = 0.707) {
   return output;
 }
 
+function blendBuffers(dry, wet, wetMix = 1) {
+  const mix = clamp(wetMix, 0, 1);
+  if (mix >= 0.999) return wet;
+  if (mix <= 0.001) return dry;
+
+  const output = createBufferLike(dry);
+  for (let ch = 0; ch < output.numberOfChannels; ch++) {
+    const out = output.getChannelData(ch);
+    const dryData = dry.getChannelData(ch);
+    const wetData = wet.getChannelData(ch);
+    for (let i = 0; i < out.length; i++) {
+      out[i] = dryData[i] * (1 - mix) + wetData[i] * mix;
+    }
+  }
+
+  return output;
+}
+
 function downmixMono(buffer) {
   const mono = new Float32Array(buffer.length);
   const channelWeight = 1 / buffer.numberOfChannels;
@@ -808,29 +826,99 @@ export function applyArtifactSafeAirRecovery(buffer, options = {}) {
   const airDB = profile.airDB ?? -18;
   const harshDB = profile.harshDB ?? -18;
   const metallicDB = profile.metallicDB ?? -18;
+  const presenceToBodyDB = profile.presenceToBodyDB ?? 0;
   const spikeDensity = analysis.peaks?.spikeDensity ?? 0;
-  const safeToOpen = airDB < -16.4 &&
-    harshDB < -14 &&
-    metallicDB < -18 &&
-    spikeDensity < 0.009;
+  const safeToOpen = airDB < -14.8 &&
+    harshDB < -12.8 &&
+    metallicDB < -16.8 &&
+    spikeDensity < 0.012;
 
   if (!safeToOpen) {
-    return { buffer, analysis, moves: { airShelf: 0, presenceLift: 0, skipped: true } };
+    return { buffer, analysis, moves: { airShelf: 0, presenceLift: 0, intelligibilityLift: 0, skipped: true } };
   }
 
-  const airShelf = clamp((-15.8 - airDB) * 0.34 * amount, 0.18, 1.15);
-  const presenceLift = clamp((-14.4 - harshDB) * 0.08 * amount, 0, 0.25);
+  const airShelf = clamp((-14.1 - airDB) * 0.72 * amount, 0.45, 3.2);
+  const presenceLift = clamp((-12.9 - harshDB) * 0.2 * amount, 0.08, 0.85);
+  const intelligibilityLift = clamp((-3.9 - presenceToBodyDB) * 0.18 * amount, 0, 0.62);
   let output = applyFilterToBuffer(buffer, 'highshelf', 12500, airShelf, 0.65);
   if (presenceLift > 0.02) {
     output = applyFilterToBuffer(output, 'peaking', 4200, presenceLift, 0.9);
+  }
+  if (intelligibilityLift > 0.02) {
+    output = applyFilterToBuffer(output, 'peaking', 3200, intelligibilityLift, 0.85);
+  }
+
+  const postAnalysis = analyzeAIGeneratedMastering(output);
+  const postProfile = postAnalysis.profile || {};
+  const postSpikeDensity = postAnalysis.peaks?.spikeDensity ?? 0;
+  const postHarshDB = postProfile.harshDB ?? harshDB;
+  const postMetallicDB = postProfile.metallicDB ?? metallicDB;
+  const postCodecStress = postAnalysis.codecStress ?? 0;
+  const maxSpikeDensity = Math.max(0.0095, spikeDensity + 0.0018);
+  const maxCodecStress = Math.max(0.96, (analysis.codecStress ?? 0) + 0.18);
+  const tooRisky = postSpikeDensity > maxSpikeDensity ||
+    postHarshDB > -13.2 ||
+    postMetallicDB > -17.2 ||
+    postCodecStress > maxCodecStress;
+
+  if (tooRisky) {
+    const spikeOvershoot = Math.max(0, postSpikeDensity - maxSpikeDensity);
+    const harshOvershoot = Math.max(0, postHarshDB - -13.2);
+    const metallicOvershoot = Math.max(0, postMetallicDB - -17.2);
+    const codecOvershoot = Math.max(0, postCodecStress - maxCodecStress);
+    const riskOvershoot = spikeOvershoot * 280 +
+      harshOvershoot * 0.22 +
+      metallicOvershoot * 0.18 +
+      codecOvershoot * 0.65;
+    const guardedMix = clamp(0.68 - riskOvershoot, 0.48, 0.64);
+    const guardedOutput = blendBuffers(buffer, output, guardedMix);
+    const guardedAnalysis = analyzeAIGeneratedMastering(guardedOutput);
+    const guardedProfile = guardedAnalysis.profile || {};
+    const guardedSpikeDensity = guardedAnalysis.peaks?.spikeDensity ?? 0;
+    const guardedSafe = guardedSpikeDensity <= Math.max(0.0095, spikeDensity + 0.0012) &&
+      (guardedProfile.harshDB ?? harshDB) <= -13.4 &&
+      (guardedProfile.metallicDB ?? metallicDB) <= -17.4 &&
+      (guardedAnalysis.codecStress ?? 0) <= maxCodecStress;
+
+    if (guardedSafe) {
+      return {
+        buffer: guardedOutput,
+        analysis,
+        postAnalysis: guardedAnalysis,
+        moves: {
+          airShelf,
+          presenceLift,
+          intelligibilityLift,
+          guarded: true,
+          mix: guardedMix,
+          skipped: false
+        }
+      };
+    }
+
+    return {
+      buffer,
+      analysis,
+      postAnalysis,
+      moves: {
+        airShelf,
+        presenceLift,
+        intelligibilityLift,
+        reverted: true,
+        skipped: true
+      }
+    };
   }
 
   return {
     buffer: output,
     analysis,
+    postAnalysis,
     moves: {
       airShelf,
       presenceLift,
+      intelligibilityLift,
+      guarded: false,
       skipped: false
     }
   };
