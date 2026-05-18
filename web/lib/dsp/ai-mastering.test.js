@@ -817,4 +817,33 @@ describe('AI-generated mastering repair', () => {
     expect(recovered.moves.airShelf).toBeGreaterThan(0);
     expect(skipped.moves.skipped).toBe(true);
   });
+
+  it('can use a wider commercial-safe air target without changing the default guard', () => {
+    const darkSafe = makeToneBuffer({
+      frequencies: [
+        [180, 0.1],
+        [900, 0.08],
+        [4200, 0.015],
+        [12500, 0.004]
+      ]
+    });
+
+    const gentle = applyArtifactSafeAirRecovery(darkSafe, { amount: 1 });
+    const open = applyArtifactSafeAirRecovery(darkSafe, {
+      amount: 1,
+      targetAirDB: -10.8,
+      airScale: 1.24,
+      safeAirThresholdDB: -12.8,
+      safeSpikeDensity: 0.024,
+      maxAirShelf: 6.8,
+      maxSpikeIncrease: 0.009,
+      absoluteSpikeFloor: 0.025,
+      maxHarshDB: -11.4,
+      maxMetallicDB: -14.8
+    });
+
+    expect(gentle.moves.skipped).toBe(false);
+    expect(open.moves.skipped).toBe(false);
+    expect(open.moves.airShelf).toBeGreaterThan(gentle.moves.airShelf);
+  });
 });

@@ -828,18 +828,23 @@ export function applyArtifactSafeAirRecovery(buffer, options = {}) {
   const metallicDB = profile.metallicDB ?? -18;
   const presenceToBodyDB = profile.presenceToBodyDB ?? 0;
   const spikeDensity = analysis.peaks?.spikeDensity ?? 0;
-  const safeToOpen = airDB < -14.8 &&
-    harshDB < -12.8 &&
-    metallicDB < -16.8 &&
-    spikeDensity < 0.012;
+  const targetAirDB = options.targetAirDB ?? -14.1;
+  const safeAirThresholdDB = options.safeAirThresholdDB ?? -14.8;
+  const safeHarshThresholdDB = options.safeHarshThresholdDB ?? -12.8;
+  const safeMetallicThresholdDB = options.safeMetallicThresholdDB ?? -16.8;
+  const safeSpikeDensity = options.safeSpikeDensity ?? 0.012;
+  const safeToOpen = airDB < safeAirThresholdDB &&
+    harshDB < safeHarshThresholdDB &&
+    metallicDB < safeMetallicThresholdDB &&
+    spikeDensity < safeSpikeDensity;
 
   if (!safeToOpen) {
     return { buffer, analysis, moves: { airShelf: 0, presenceLift: 0, intelligibilityLift: 0, skipped: true } };
   }
 
-  const airShelf = clamp((-14.1 - airDB) * 0.72 * amount, 0.45, 3.2);
-  const presenceLift = clamp((-12.9 - harshDB) * 0.2 * amount, 0.08, 0.85);
-  const intelligibilityLift = clamp((-3.9 - presenceToBodyDB) * 0.18 * amount, 0, 0.62);
+  const airShelf = clamp((targetAirDB - airDB) * (options.airScale ?? 0.72) * amount, options.minAirShelf ?? 0.45, options.maxAirShelf ?? 3.2);
+  const presenceLift = clamp((-12.9 - harshDB) * (options.presenceScale ?? 0.2) * amount, 0.08, options.maxPresenceLift ?? 0.85);
+  const intelligibilityLift = clamp((-3.9 - presenceToBodyDB) * (options.intelligibilityScale ?? 0.18) * amount, 0, options.maxIntelligibilityLift ?? 0.62);
   let output = applyFilterToBuffer(buffer, 'highshelf', 12500, airShelf, 0.65);
   if (presenceLift > 0.02) {
     output = applyFilterToBuffer(output, 'peaking', 4200, presenceLift, 0.9);
@@ -854,30 +859,30 @@ export function applyArtifactSafeAirRecovery(buffer, options = {}) {
   const postHarshDB = postProfile.harshDB ?? harshDB;
   const postMetallicDB = postProfile.metallicDB ?? metallicDB;
   const postCodecStress = postAnalysis.codecStress ?? 0;
-  const maxSpikeDensity = Math.max(0.0095, spikeDensity + 0.0018);
-  const maxCodecStress = Math.max(0.96, (analysis.codecStress ?? 0) + 0.18);
+  const maxSpikeDensity = Math.max(options.absoluteSpikeFloor ?? 0.0095, spikeDensity + (options.maxSpikeIncrease ?? 0.0018));
+  const maxCodecStress = Math.max(options.maxCodecStressFloor ?? 0.96, (analysis.codecStress ?? 0) + (options.maxCodecStressIncrease ?? 0.18));
   const tooRisky = postSpikeDensity > maxSpikeDensity ||
-    postHarshDB > -13.2 ||
-    postMetallicDB > -17.2 ||
+    postHarshDB > (options.maxHarshDB ?? -13.2) ||
+    postMetallicDB > (options.maxMetallicDB ?? -17.2) ||
     postCodecStress > maxCodecStress;
 
   if (tooRisky) {
     const spikeOvershoot = Math.max(0, postSpikeDensity - maxSpikeDensity);
-    const harshOvershoot = Math.max(0, postHarshDB - -13.2);
-    const metallicOvershoot = Math.max(0, postMetallicDB - -17.2);
+    const harshOvershoot = Math.max(0, postHarshDB - (options.maxHarshDB ?? -13.2));
+    const metallicOvershoot = Math.max(0, postMetallicDB - (options.maxMetallicDB ?? -17.2));
     const codecOvershoot = Math.max(0, postCodecStress - maxCodecStress);
     const riskOvershoot = spikeOvershoot * 280 +
       harshOvershoot * 0.22 +
       metallicOvershoot * 0.18 +
       codecOvershoot * 0.65;
-    const guardedMix = clamp(0.68 - riskOvershoot, 0.48, 0.64);
+    const guardedMix = clamp(0.68 - riskOvershoot, options.guardedMinMix ?? 0.48, options.guardedMaxMix ?? 0.64);
     const guardedOutput = blendBuffers(buffer, output, guardedMix);
     const guardedAnalysis = analyzeAIGeneratedMastering(guardedOutput);
     const guardedProfile = guardedAnalysis.profile || {};
     const guardedSpikeDensity = guardedAnalysis.peaks?.spikeDensity ?? 0;
-    const guardedSafe = guardedSpikeDensity <= Math.max(0.0095, spikeDensity + 0.0012) &&
-      (guardedProfile.harshDB ?? harshDB) <= -13.4 &&
-      (guardedProfile.metallicDB ?? metallicDB) <= -17.4 &&
+    const guardedSafe = guardedSpikeDensity <= Math.max(options.guardedAbsoluteSpikeFloor ?? 0.0095, spikeDensity + (options.guardedMaxSpikeIncrease ?? 0.0012)) &&
+      (guardedProfile.harshDB ?? harshDB) <= (options.guardedMaxHarshDB ?? -13.4) &&
+      (guardedProfile.metallicDB ?? metallicDB) <= (options.guardedMaxMetallicDB ?? -17.4) &&
       (guardedAnalysis.codecStress ?? 0) <= maxCodecStress;
 
     if (guardedSafe) {

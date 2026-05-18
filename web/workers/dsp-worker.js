@@ -8,7 +8,7 @@
  * - Progress: { id: number, type: 'PROGRESS', progress: number, status: string }
  */
 
-const DSP_RENDER_REVISION = '2026-05-18-artifact-safe-commercial-open-v8';
+const DSP_RENDER_REVISION = '2026-05-19-artifact-safe-commercial-open-v14';
 
 // Import DSP modules
 import {
@@ -1623,9 +1623,14 @@ self.onmessage = async (e) => {
             (artifactPreAnalysis.profile?.airDB ?? -18) < -16.2 &&
             (artifactPreAnalysis.profile?.metallicDB ?? -18) < -18 &&
             (artifactPreAnalysis.profile?.harshDB ?? -18) < -14;
+          const brightArtifactSafeSource = !settings.isLossySource &&
+            (artifactPreAnalysis.profile?.airDB ?? -18) > -14.2 &&
+            (artifactPreAnalysis.profile?.metallicDB ?? -18) > -16.4 &&
+            (artifactPreAnalysis.profile?.harshDB ?? -18) > -13.2;
           chainDebug.artifactRepair = {
             artifactAmount,
             darkArtifactSafeSource,
+            brightArtifactSafeSource,
             preAirDB: artifactPreAnalysis.profile?.airDB ?? null,
             preHarshDB: artifactPreAnalysis.profile?.harshDB ?? null,
             preMetallicDB: artifactPreAnalysis.profile?.metallicDB ?? null
@@ -1633,9 +1638,13 @@ self.onmessage = async (e) => {
           buffer = applyPianoHighArtifactSuppressor(buffer, {
             amount: darkArtifactSafeSource
               ? Math.min(0.88, 0.54 + artifactAmount * 0.36)
+              : brightArtifactSafeSource
+                ? Math.min(0.72, 0.4 + artifactAmount * 0.3)
               : Math.min(0.96, 0.58 + artifactAmount * 0.42),
             sensitivity: darkArtifactSafeSource
               ? Math.min(0.9, 0.42 + artifactAmount * 0.5)
+              : brightArtifactSafeSource
+                ? Math.min(0.74, 0.32 + artifactAmount * 0.4)
               : Math.min(1, 0.45 + artifactAmount * 0.6)
           });
           const rescueAnalysis = artifactAmount >= 0.88 ? analyzeAIGeneratedMastering(buffer) : null;
@@ -1660,7 +1669,20 @@ self.onmessage = async (e) => {
             });
             buffer = rescued.buffer;
             const recovered = applyArtifactSafeAirRecovery(buffer, {
-              amount: settings.isLossySource ? 0.35 : 0.75
+              amount: settings.isLossySource ? 0.35 : brightArtifactSafeSource ? 1 : 0.75,
+              ...(brightArtifactSafeSource ? {
+                targetAirDB: -13.2,
+                safeAirThresholdDB: -13.4,
+                safeSpikeDensity: 0.016,
+                maxSpikeIncrease: 0.0035,
+                absoluteSpikeFloor: 0.015,
+                maxHarshDB: -12.6,
+                maxMetallicDB: -16.6,
+                guardedMaxSpikeIncrease: 0.0025,
+                guardedAbsoluteSpikeFloor: 0.014,
+                guardedMaxHarshDB: -12.8,
+                guardedMaxMetallicDB: -16.8
+              } : {})
             });
             buffer = recovered.buffer;
             chainDebug.artifactRepair.branch = 'metallic-tone-cut';
@@ -1814,11 +1836,37 @@ self.onmessage = async (e) => {
 
         if (artifactSafeMode) {
           sendProgress(id, 0.80, 'Opening safe master air...');
+          const finalPolishAnalysis = analyzeAIGeneratedMastering(buffer);
+          const finalBrightSafeSource = !settings.isLossySource &&
+            (finalPolishAnalysis.profile?.airDB ?? -18) < -14.8 &&
+            (finalPolishAnalysis.profile?.harshDB ?? -18) < -13.6 &&
+            (finalPolishAnalysis.profile?.metallicDB ?? -18) < -17.6 &&
+            (finalPolishAnalysis.peaks?.spikeDensity ?? 1) < 0.014;
           const polished = applyArtifactSafeAirRecovery(buffer, {
-            amount: settings.isLossySource ? 0.45 : 0.95
+            amount: settings.isLossySource ? 0.45 : finalBrightSafeSource ? 1 : 0.95,
+            ...(finalBrightSafeSource ? {
+              targetAirDB: -10.8,
+              airScale: 1.24,
+              safeAirThresholdDB: -12.8,
+              safeSpikeDensity: 0.024,
+              maxAirShelf: 6.8,
+              maxPresenceLift: 1.16,
+              maxIntelligibilityLift: 0.78,
+              maxSpikeIncrease: 0.009,
+              absoluteSpikeFloor: 0.025,
+              maxHarshDB: -11.4,
+              maxMetallicDB: -14.8,
+              guardedMinMix: 0.5,
+              guardedMaxMix: 0.72,
+              guardedMaxSpikeIncrease: 0.0065,
+              guardedAbsoluteSpikeFloor: 0.021,
+              guardedMaxHarshDB: -11.8,
+              guardedMaxMetallicDB: -15.3
+            } : {})
           });
           buffer = polished.buffer;
           if (chainDebug.artifactRepair) {
+            chainDebug.artifactRepair.finalBrightSafeSource = finalBrightSafeSource;
             chainDebug.artifactRepair.finalAirRecovery = polished.moves || null;
           }
         }

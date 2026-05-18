@@ -182,6 +182,10 @@ function fileHash(filePath) {
   return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function printSummary(item) {
   const p = item.analysis.profile;
   const peaks = item.analysis.peaks;
@@ -200,8 +204,10 @@ function printSummary(item) {
 }
 
 const sampleDir = path.resolve('sample');
+const baseName = process.argv[2] || 'BURN THE BRIDGE';
+const escapedBaseName = escapeRegExp(baseName);
 const wamFiles = fs.readdirSync(sampleDir)
-  .filter(file => /^BURN THE BRIDGE_wam(?: - #\d+(?:_[^.]+)?)?\.wav$/i.test(file))
+  .filter(file => new RegExp(`^${escapedBaseName}_wam(?:\\s*-\\s*)?_?#\\d+(?:_[^.]+)?\\.wav$|^${escapedBaseName}_wam\\.wav$`, 'i').test(file))
   .sort((a, b) => {
     const getTake = (name) => Number(name.match(/#(\d+)/)?.[1] || 1);
     return getTake(a) - getTake(b);
@@ -211,8 +217,8 @@ const wamFiles = fs.readdirSync(sampleDir)
     return [take ? `WAM #${take}` : 'WAM', path.join(sampleDir, file)];
   });
 const files = [
-  ['Original', path.join(sampleDir, 'BURN THE BRIDGE.wav')],
-  ['BandLab', path.join(sampleDir, 'BURN THE BRIDGE bandlab.wav')],
+  ['Original', path.join(sampleDir, `${baseName}.wav`)],
+  ['BandLab', path.join(sampleDir, `${baseName} bandlab.wav`)],
   ...wamFiles
 ];
 
