@@ -380,9 +380,7 @@ export function createOfflineNodes(offlineCtx, settings) {
   nodes.midPeak.Q.value = 2;
   nodes.midPeak.gain.value = 0; // Harshness taming handled by deharsh dynamic processor
 
-  const artifactSafeMode = settings.isLossySource ||
-    (settings.artifactProtection ?? 0) >= 0.78 ||
-    (settings.sibilanceProtection ?? 0) >= 0.75;
+  const artifactSafeMode = Boolean(settings.isLossySource) || Boolean(settings.artifactRescueMode);
   if (settings.glueCompression && !artifactSafeMode) {
     nodes.compressor.threshold.value = -14;
     nodes.compressor.knee.value = 24;

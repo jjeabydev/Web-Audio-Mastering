@@ -8,7 +8,7 @@
  * - Progress: { id: number, type: 'PROGRESS', progress: number, status: string }
  */
 
-const DSP_RENDER_REVISION = '2026-05-19-artifact-safe-commercial-open-v14';
+const DSP_RENDER_REVISION = '2026-05-23-wav-only-transparent-master-v39';
 
 // Import DSP modules
 import {
@@ -36,8 +36,14 @@ import {
   applyLimiterStressGuard,
   applyStereoStabilityGuard,
   applyPianoHighArtifactSuppressor,
+  applyVocalMidCrackleSuppressor,
   applyMetallicRescueTone,
   applyArtifactSafeAirRecovery,
+  applyDynamicSibilanceSuppressor,
+  applyAddedSibilanceGuard,
+  applySourceDifferentialToneGuard,
+  applySourceConstrainedSibilanceRepair,
+  applySourceConstrainedVocalBuzzRepair,
   finalizeMasteringTarget
 } from '../lib/dsp/index.js';
 
@@ -1497,20 +1503,30 @@ self.onmessage = async (e) => {
         for (let ch = 0; ch < channels.length; ch++) {
           buffer.copyToChannel(channels[ch], ch);
         }
+        const sourceReferenceBuffer = new WorkerAudioBuffer({
+          numberOfChannels: buffer.numberOfChannels,
+          length: buffer.length,
+          sampleRate: buffer.sampleRate
+        });
+        for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+          sourceReferenceBuffer.copyToChannel(buffer.getChannelData(ch), ch);
+        }
 
         // Track level through the chain
         console.log(`[Worker Chain] Starting render (Mode: ${mode})`);
-        const artifactSafeMode = settings.isLossySource ||
-          (settings.artifactProtection ?? 0) >= 0.78 ||
-          (settings.sibilanceProtection ?? 0) >= 0.75;
+        const losslessTransparentMasterMode = settings.aiEnhance !== false;
+        const artifactSafeMode = losslessTransparentMasterMode;
+        const losslessArtifactSafeMode = losslessTransparentMasterMode;
         const rescueArtifactMode = (settings.artifactProtection ?? 0) >= 0.85;
         const requestedTargetLufs = settings.targetLufs ?? -14;
-        const safeTargetLufs = artifactSafeMode
-          ? Math.min(
-            Math.max(requestedTargetLufs, settings.isLossySource ? -13.6 : -13.0),
-            rescueArtifactMode ? -12.9 : -13.1
-          )
-          : settings.targetLufs;
+        const safeTargetLufs = losslessArtifactSafeMode
+          ? Math.min(requestedTargetLufs, -14)
+          : artifactSafeMode
+            ? Math.min(
+              Math.max(requestedTargetLufs, settings.isLossySource ? -13.6 : -13.0),
+              rescueArtifactMode ? -12.9 : -13.1
+            )
+            : settings.targetLufs;
         const chainDebug = {
           revision: DSP_RENDER_REVISION,
           mode,
@@ -1557,14 +1573,16 @@ self.onmessage = async (e) => {
           buffer = processHybridDynamic(buffer, 'mastering');
         }
 
-        // 1.5 AI-generated / lossy-source repair
+        // 1.5 Legacy generated-source repair. WAV transparent mode bypasses this so
+        // mastering cannot add new sibilant/crackle texture that was not in the source.
         if (settings.aiEnhance !== false && !artifactSafeMode) {
-          sendProgress(id, 0.22, 'Repairing AI/MP3 artifacts...');
+          sendProgress(id, 0.22, 'Repairing generated-source artifacts...');
           const repaired = applyAIGeneratedMasteringRepair(buffer, {
             profile: settings.aiProfile || 'auto',
             intensity: settings.aiIntensity ?? 1,
             sibilanceProtection: settings.sibilanceProtection ?? 0.6,
             artifactProtection: settings.artifactProtection ?? 0.7,
+            artifactRescueMode: settings.artifactRescueMode,
             isLossySource: settings.isLossySource,
             cleanLowEnd: settings.cleanLowEnd
           });
@@ -1609,16 +1627,19 @@ self.onmessage = async (e) => {
         // 4. Multiband Transient / Add Punch (if enabled)
         if (settings.addPunch && !artifactSafeMode) {
           sendProgress(id, 0.55, 'Applying multiband transient...');
-          const transientAmount = settings.isLossySource || (settings.artifactProtection ?? 0) >= 0.78
+          const transientAmount = settings.isLossySource || settings.artifactRescueMode
             ? 0.45
             : 1;
           buffer = applyMultibandTransient(buffer, undefined, { amount: transientAmount });
         }
 
-        if (artifactSafeMode) {
-          sendProgress(id, 0.56, 'Suppressing high-note piano artifacts...');
+        if (artifactSafeMode && !losslessTransparentMasterMode) {
+          sendProgress(id, 0.56, 'Suppressing mid/high crackle artifacts...');
           const artifactAmount = Math.max(0, Math.min(1, settings.artifactProtection ?? 0.7));
           const artifactPreAnalysis = analyzeAIGeneratedMastering(buffer);
+          const useSampleCrackleRepair = Boolean(settings.isLossySource) ||
+            (artifactPreAnalysis.codecStress ?? 0) > 0.72 ||
+            (artifactPreAnalysis.peaks?.spikeDensity ?? 0) > 0.012;
           const darkArtifactSafeSource = !settings.isLossySource &&
             (artifactPreAnalysis.profile?.airDB ?? -18) < -16.2 &&
             (artifactPreAnalysis.profile?.metallicDB ?? -18) < -18 &&
@@ -1633,21 +1654,35 @@ self.onmessage = async (e) => {
             brightArtifactSafeSource,
             preAirDB: artifactPreAnalysis.profile?.airDB ?? null,
             preHarshDB: artifactPreAnalysis.profile?.harshDB ?? null,
-            preMetallicDB: artifactPreAnalysis.profile?.metallicDB ?? null
+            preMetallicDB: artifactPreAnalysis.profile?.metallicDB ?? null,
+            useSampleCrackleRepair
           };
-          buffer = applyPianoHighArtifactSuppressor(buffer, {
-            amount: darkArtifactSafeSource
-              ? Math.min(0.88, 0.54 + artifactAmount * 0.36)
-              : brightArtifactSafeSource
-                ? Math.min(0.72, 0.4 + artifactAmount * 0.3)
-              : Math.min(0.96, 0.58 + artifactAmount * 0.42),
-            sensitivity: darkArtifactSafeSource
-              ? Math.min(0.9, 0.42 + artifactAmount * 0.5)
-              : brightArtifactSafeSource
-                ? Math.min(0.74, 0.32 + artifactAmount * 0.4)
-              : Math.min(1, 0.45 + artifactAmount * 0.6)
-          });
-          const rescueAnalysis = artifactAmount >= 0.88 ? analyzeAIGeneratedMastering(buffer) : null;
+          if (useSampleCrackleRepair) {
+            buffer = applyPianoHighArtifactSuppressor(buffer, {
+              amount: darkArtifactSafeSource
+                ? Math.min(0.62, 0.38 + artifactAmount * 0.22)
+                : brightArtifactSafeSource
+                  ? Math.min(0.5, 0.28 + artifactAmount * 0.2)
+                : Math.min(0.68, 0.4 + artifactAmount * 0.26),
+              sensitivity: darkArtifactSafeSource
+                ? Math.min(0.78, 0.36 + artifactAmount * 0.36)
+                : brightArtifactSafeSource
+                  ? Math.min(0.64, 0.28 + artifactAmount * 0.3)
+                : Math.min(0.84, 0.38 + artifactAmount * 0.42)
+            });
+            buffer = applyVocalMidCrackleSuppressor(buffer, {
+              amount: brightArtifactSafeSource
+                ? Math.min(0.38, 0.22 + artifactAmount * 0.16)
+                : Math.min(0.46, 0.26 + artifactAmount * 0.2),
+              sensitivity: brightArtifactSafeSource
+                ? Math.min(0.68, 0.42 + artifactAmount * 0.22)
+                : Math.min(0.74, 0.46 + artifactAmount * 0.28),
+              clusterAmount: 0
+            });
+          }
+          const rescueAnalysis = !losslessArtifactSafeMode && artifactAmount >= 0.88
+            ? analyzeAIGeneratedMastering(buffer)
+            : null;
           const needsMetallicToneCut = rescueAnalysis && (
             (rescueAnalysis.profile?.metallicDB ?? -18) > -16.5 ||
             (rescueAnalysis.profile?.harshDB ?? -18) > -12.5 ||
@@ -1668,35 +1703,36 @@ self.onmessage = async (e) => {
               isLossySource: settings.isLossySource
             });
             buffer = rescued.buffer;
-            const recovered = applyArtifactSafeAirRecovery(buffer, {
-              amount: settings.isLossySource ? 0.35 : brightArtifactSafeSource ? 1 : 0.75,
-              ...(brightArtifactSafeSource ? {
-                targetAirDB: -13.2,
-                safeAirThresholdDB: -13.4,
-                safeSpikeDensity: 0.016,
-                maxSpikeIncrease: 0.0035,
-                absoluteSpikeFloor: 0.015,
-                maxHarshDB: -12.6,
-                maxMetallicDB: -16.6,
-                guardedMaxSpikeIncrease: 0.0025,
-                guardedAbsoluteSpikeFloor: 0.014,
-                guardedMaxHarshDB: -12.8,
-                guardedMaxMetallicDB: -16.8
-              } : {})
+            const deEssed = applyDynamicSibilanceSuppressor(buffer, {
+              amount: settings.isLossySource ? 0.78 : 0.68,
+              threshold: settings.isLossySource ? 0.23 : 0.27,
+              ratio: settings.isLossySource ? 0.46 : 0.54,
+              maxCutDB: settings.isLossySource ? 5.0 : 4.0,
+              airCutDB: settings.isLossySource ? 2.8 : 2.0,
+              detectorQ: 1.0,
+              attackMs: 0.35,
+              releaseMs: 82
             });
-            buffer = recovered.buffer;
+            buffer = deEssed.buffer;
             chainDebug.artifactRepair.branch = 'metallic-tone-cut';
             chainDebug.artifactRepair.moves = {
               metallic: rescued.moves || null,
-              airRecovery: recovered.moves || null
+              dynamicDeEss: deEssed.moves || null
             };
-          } else {
-            const recovered = applyArtifactSafeAirRecovery(buffer, {
-              amount: settings.isLossySource ? 0.55 : 1
+          } else if (!losslessArtifactSafeMode) {
+            const deEssed = applyDynamicSibilanceSuppressor(buffer, {
+              amount: settings.isLossySource ? 0.72 : 0.58,
+              threshold: settings.isLossySource ? 0.24 : 0.3,
+              ratio: settings.isLossySource ? 0.5 : 0.62,
+              maxCutDB: settings.isLossySource ? 4.4 : 3.4,
+              airCutDB: settings.isLossySource ? 2.4 : 1.7,
+              detectorQ: 1.0,
+              attackMs: 0.4,
+              releaseMs: 78
             });
-            buffer = recovered.buffer;
-            chainDebug.artifactRepair.branch = 'air-recovery';
-            chainDebug.artifactRepair.moves = recovered.moves || null;
+            buffer = deEssed.buffer;
+            chainDebug.artifactRepair.branch = 'dynamic-deess';
+            chainDebug.artifactRepair.moves = deEssed.moves || null;
           }
         }
 
@@ -1753,7 +1789,9 @@ self.onmessage = async (e) => {
         // HPF is controlled by Clean Low End; LPF opens up on clean or already dark sources.
         sendProgress(id, 0.60, 'Applying final filters...');
         const finalFilterAnalysis = settings.aiEnhance !== false && !artifactSafeMode ? analyzeAIGeneratedMastering(buffer) : null;
-        const finalFilterOptions = getAdaptiveFinalFilterOptions(finalFilterAnalysis, settings);
+        const finalFilterOptions = losslessTransparentMasterMode
+          ? { lowpass: false, lowpassFreq: 20500 }
+          : getAdaptiveFinalFilterOptions(finalFilterAnalysis, settings);
         buffer = applyFinalFilters(buffer, {
           highpass: false,
           ...finalFilterOptions
@@ -1818,13 +1856,16 @@ self.onmessage = async (e) => {
                 data[i] *= gainLin;
               }
             }
-            if (settings.truePeakLimit && desiredGainDB > gainDB + 0.25) {
+            if (settings.truePeakLimit && desiredGainDB > gainDB + 0.25 && !losslessTransparentMasterMode) {
               const artifactAmount = Math.max(0, Math.min(1, settings.artifactProtection ?? 0.7));
               const calibrated = finalizeMasteringTarget(buffer, {
                 targetLufs: safeTargetLufs,
                 ceilingDB: settings.truePeakCeiling || -1.5,
                 toleranceDB: 0.25,
-                maxLimiterPushDB: artifactAmount >= 0.9 ? 1.35 : 1.8
+                maxLimiterPushDB: losslessArtifactSafeMode
+                  ? 0.45
+                  : artifactAmount >= 0.9 ? 1.35 : 1.8,
+                maxPasses: losslessArtifactSafeMode ? 1 : 3
               });
               buffer = calibrated.buffer;
             }
@@ -1834,40 +1875,63 @@ self.onmessage = async (e) => {
           }
         }
 
-        if (artifactSafeMode) {
+        if (artifactSafeMode && !losslessArtifactSafeMode) {
           sendProgress(id, 0.80, 'Opening safe master air...');
           const finalPolishAnalysis = analyzeAIGeneratedMastering(buffer);
           const finalBrightSafeSource = !settings.isLossySource &&
             (finalPolishAnalysis.profile?.airDB ?? -18) < -14.8 &&
             (finalPolishAnalysis.profile?.harshDB ?? -18) < -13.6 &&
             (finalPolishAnalysis.profile?.metallicDB ?? -18) < -17.6 &&
-            (finalPolishAnalysis.peaks?.spikeDensity ?? 1) < 0.014;
+            (finalPolishAnalysis.peaks?.spikeDensity ?? 1) < 0.0125;
           const polished = applyArtifactSafeAirRecovery(buffer, {
-            amount: settings.isLossySource ? 0.45 : finalBrightSafeSource ? 1 : 0.95,
+            amount: settings.isLossySource ? 0 : finalBrightSafeSource ? 0.25 : 0.15,
             ...(finalBrightSafeSource ? {
-              targetAirDB: -10.8,
-              airScale: 1.24,
-              safeAirThresholdDB: -12.8,
-              safeSpikeDensity: 0.024,
-              maxAirShelf: 6.8,
-              maxPresenceLift: 1.16,
-              maxIntelligibilityLift: 0.78,
-              maxSpikeIncrease: 0.009,
-              absoluteSpikeFloor: 0.025,
-              maxHarshDB: -11.4,
-              maxMetallicDB: -14.8,
-              guardedMinMix: 0.5,
-              guardedMaxMix: 0.72,
-              guardedMaxSpikeIncrease: 0.0065,
-              guardedAbsoluteSpikeFloor: 0.021,
-              guardedMaxHarshDB: -11.8,
-              guardedMaxMetallicDB: -15.3
+              targetAirDB: -15.0,
+              airScale: 0.32,
+              minAirShelf: 0,
+              safeAirThresholdDB: -14.8,
+              safeSpikeDensity: 0.009,
+              maxAirShelf: 1.0,
+              presenceScale: 0,
+              intelligibilityScale: 0,
+              maxPresenceLift: 0,
+              maxIntelligibilityLift: 0,
+              maxSpikeIncrease: 0.0008,
+              absoluteSpikeFloor: 0.0105,
+              maxHarshDB: -14.2,
+              maxMetallicDB: -18.3,
+              guardedMinMix: 0.18,
+              guardedMaxMix: 0.3,
+              guardedMaxSpikeIncrease: 0.0006,
+              guardedAbsoluteSpikeFloor: 0.0102,
+              guardedMaxHarshDB: -14.4,
+              guardedMaxMetallicDB: -18.5
             } : {})
           });
           buffer = polished.buffer;
+          const deEssed = applyDynamicSibilanceSuppressor(buffer, {
+            amount: settings.isLossySource ? 0.82 : finalBrightSafeSource ? 0.62 : 0.74,
+            threshold: settings.isLossySource ? 0.22 : 0.26,
+            ratio: settings.isLossySource ? 0.44 : 0.52,
+            maxCutDB: settings.isLossySource ? 5.4 : 4.4,
+            airCutDB: settings.isLossySource ? 3.0 : 2.2,
+            detectorQ: 1.0,
+            attackMs: 0.35,
+            releaseMs: 86
+          });
+          buffer = deEssed.buffer;
+          if (settings.isLossySource) {
+            buffer = applyVocalMidCrackleSuppressor(buffer, {
+              amount: 0.34,
+              sensitivity: 0.68,
+              clusterAmount: 0
+            });
+          }
           if (chainDebug.artifactRepair) {
             chainDebug.artifactRepair.finalBrightSafeSource = finalBrightSafeSource;
             chainDebug.artifactRepair.finalAirRecovery = polished.moves || null;
+            chainDebug.artifactRepair.postPolishDynamicDeEss = deEssed.moves || null;
+            chainDebug.artifactRepair.postPolishVocalCrackleGuard = Boolean(settings.isLossySource);
           }
         }
 
@@ -1890,7 +1954,13 @@ self.onmessage = async (e) => {
         }
 
         // 9. Soft Clipper
-        if (settings.truePeakLimit && !artifactSafeMode) {
+        const avoidHarmonicPeakShaping = !artifactSafeMode && (
+          settings.limiterCharacter === 'transparent' ||
+          (settings.sibilanceProtection ?? 0) >= 0.75 ||
+          (settings.artifactProtection ?? 0) >= 0.8
+        );
+
+        if (settings.truePeakLimit && !artifactSafeMode && !avoidHarmonicPeakShaping) {
           sendProgress(id, 0.85, 'Applying soft clipper...');
           const ceiling = settings.truePeakCeiling || -1;
           const limiterCharacter = settings.limiterCharacter || 'balanced';
@@ -1898,14 +1968,17 @@ self.onmessage = async (e) => {
             : limiterCharacter === 'punch' ? 1.05
               : limiterCharacter === 'dense' ? 1.2
                 : 1.0;
-          const artifactSafeScale = settings.isLossySource || (settings.artifactProtection ?? 0) >= 0.78
+          const artifactSafeScale = settings.isLossySource || settings.artifactRescueMode
             ? 0.72
+            : 1;
+          const sibilanceSafeScale = (settings.sibilanceProtection ?? 0) >= 0.75 || (settings.artifactProtection ?? 0) >= 0.8
+            ? 0.78
             : 1;
           buffer = applyMasteringSoftClip(buffer, {
             ceiling: ceiling,
             lookaheadMs: 0.5,
             releaseMs: 10,
-            drive: (aiProfile.softClipDrive ?? 1.5) * Math.sqrt(settings.aiIntensity ?? 1) * limiterDriveScale * artifactSafeScale
+            drive: (aiProfile.softClipDrive ?? 1.5) * Math.sqrt(settings.aiIntensity ?? 1) * limiterDriveScale * artifactSafeScale * sibilanceSafeScale
           });
         }
 
@@ -1938,6 +2011,7 @@ self.onmessage = async (e) => {
 
         if (settings.normalizeLoudness && safeTargetLufs && settings.truePeakLimit && !artifactSafeMode) {
           sendProgress(id, 0.98, 'Calibrating final loudness...');
+          const vocalSafeLimiterScale = avoidHarmonicPeakShaping ? 0.45 : 1;
           const calibrated = finalizeMasteringTarget(buffer, {
             targetLufs: safeTargetLufs,
             ceilingDB: settings.truePeakCeiling || -1,
@@ -1947,9 +2021,110 @@ self.onmessage = async (e) => {
                 : settings.limiterCharacter === 'punch' ? 1.05
                   : settings.limiterCharacter === 'dense' ? 1.25
                     : 1.0
-            ) * (artifactSafeMode ? 0.25 : 1)
+            ) * (artifactSafeMode ? 0.25 : 1) * vocalSafeLimiterScale
           });
           buffer = calibrated.buffer;
+        }
+
+        if (!artifactSafeMode && settings.aiEnhance !== false) {
+          sendProgress(id, 0.985, 'Smoothing vocal sibilance...');
+          const finalDeEssAmount = Math.max(0.34, Math.min(0.68, (settings.sibilanceProtection ?? 0.6) * 0.72));
+          const deEssed = applyDynamicSibilanceSuppressor(buffer, {
+            amount: finalDeEssAmount,
+            threshold: settings.isLossySource ? 0.24 : 0.3,
+            ratio: settings.isLossySource ? 0.5 : 0.64,
+            maxCutDB: settings.isLossySource ? 4.6 : 3.4,
+            airCutDB: settings.isLossySource ? 2.4 : 1.6,
+            detectorQ: 1.0,
+            attackMs: 0.45,
+            releaseMs: 74
+          });
+          buffer = deEssed.buffer;
+          chainDebug.finalDynamicDeEss = deEssed.moves || null;
+        }
+
+        if (settings.aiEnhance !== false && losslessArtifactSafeMode) {
+          sendProgress(id, 0.988, 'Keeping lossless master transparent...');
+          chainDebug.losslessTransparentMaster = {
+            repairGuardsBypassed: true,
+            dynamicDeEssBypassed: true,
+            finalLowpassBypassed: true,
+            limiterCalibrationBypassed: true
+          };
+        } else if (settings.aiEnhance !== false) {
+          sendProgress(id, 0.988, 'Removing added sibilance...');
+          const sourceConstrained = applySourceConstrainedSibilanceRepair(buffer, sourceReferenceBuffer, {
+            amount: artifactSafeMode ? 0.84 : 0.68,
+            allowedIncrease: artifactSafeMode ? 0.02 : 0.05,
+            threshold: artifactSafeMode ? 0.02 : 0.032,
+            ratio: artifactSafeMode ? 0.28 : 0.38,
+            maxMix: artifactSafeMode ? 0.74 : 0.58,
+            bands: [
+              { freq: 2800, q: 0.85, weight: 0.42 },
+              { freq: 3600, q: 0.9, weight: 0.54 },
+              { freq: 4200, q: 0.9, weight: 0.78 },
+              { freq: 6200, q: 1.05, weight: 1.0 },
+              { freq: 8300, q: 1.15, weight: 1.0 },
+              { freq: 11200, q: 0.95, weight: 0.82 }
+            ],
+            attackMs: 0.5,
+            releaseMs: 135
+          });
+          buffer = sourceConstrained.buffer;
+          const vocalBuzz = applySourceConstrainedVocalBuzzRepair(buffer, sourceReferenceBuffer, {
+            amount: artifactSafeMode ? 0.82 : 0.74,
+            allowedIncrease: artifactSafeMode ? 0.012 : 0.018,
+            threshold: artifactSafeMode ? 0.01 : 0.014,
+            ratio: artifactSafeMode ? 0.22 : 0.26,
+            maxMix: artifactSafeMode ? 0.72 : 0.62,
+            maxBandReduction: artifactSafeMode ? 0.7 : 0.62,
+            phaseSafe: true,
+            attackMs: 0.8,
+            releaseMs: 125,
+            detectorAttackMs: 0.45,
+            detectorReleaseMs: 36
+          });
+          buffer = vocalBuzz.buffer;
+          const guarded = applyAddedSibilanceGuard(buffer, sourceReferenceBuffer, {
+            amount: artifactSafeMode ? 0.86 : Math.max(0.48, Math.min(0.78, (settings.sibilanceProtection ?? 0.6) * 0.9)),
+            threshold: artifactSafeMode ? 0.02 : 0.035,
+            allowedIncrease: artifactSafeMode ? 0.04 : 0.1,
+            ratio: artifactSafeMode ? 0.3 : 0.4,
+            maxCutDB: artifactSafeMode ? 5.4 : 4.2,
+            airCutDB: artifactSafeMode ? 2.8 : 2.0,
+            detectorQ: 1.0,
+            attackMs: 0.3,
+            releaseMs: 110
+          });
+          buffer = guarded.buffer;
+          const finalVocalBuzz = applySourceConstrainedVocalBuzzRepair(buffer, sourceReferenceBuffer, {
+            amount: artifactSafeMode ? 0.82 : 0.7,
+            allowedIncrease: artifactSafeMode ? 0.008 : 0.012,
+            threshold: artifactSafeMode ? 0.008 : 0.012,
+            ratio: artifactSafeMode ? 0.22 : 0.24,
+            maxMix: artifactSafeMode ? 0.7 : 0.58,
+            maxBandReduction: artifactSafeMode ? 0.68 : 0.56,
+            phaseSafe: true,
+            bands: [
+              { freq: 1400, q: 0.66, weight: 0.1 },
+              { freq: 1800, q: 0.7, weight: 0.2 },
+              { freq: 2200, q: 0.76, weight: 0.38 },
+              { freq: 2900, q: 0.84, weight: 0.7 },
+              { freq: 3700, q: 0.92, weight: 0.84 },
+              { freq: 4800, q: 1.0, weight: 0.68 },
+              { freq: 6200, q: 1.06, weight: 0.5 },
+              { freq: 7800, q: 1.08, weight: 0.34 }
+            ],
+            attackMs: 0.9,
+            releaseMs: 135,
+            detectorAttackMs: 0.5,
+            detectorReleaseMs: 42
+          });
+          buffer = finalVocalBuzz.buffer;
+          chainDebug.sourceConstrainedSibilanceRepair = sourceConstrained.moves || null;
+          chainDebug.sourceConstrainedVocalBuzzRepair = vocalBuzz.moves || null;
+          chainDebug.sourceDifferentialSibilanceGuard = guarded.moves || null;
+          chainDebug.finalSourceConstrainedVocalBuzzRepair = finalVocalBuzz.moves || null;
         }
 
         if (settings.truePeakLimit) {
@@ -1968,6 +2143,106 @@ self.onmessage = async (e) => {
               true
             );
           }
+        }
+
+        if (settings.aiEnhance !== false && losslessArtifactSafeMode) {
+          sendProgress(id, 0.992, 'Preserving lossless source texture...');
+          chainDebug.finalLosslessRepairGuardsBypassed = true;
+        } else if (settings.aiEnhance !== false) {
+          sendProgress(id, 0.992, 'Checking final added fizz...');
+          const toneGuarded = applySourceDifferentialToneGuard(buffer, sourceReferenceBuffer, {
+            amount: 0.88,
+            presenceAllowanceDB: 0.12,
+            harshAllowanceDB: 0.12,
+            metallicAllowanceDB: 0.1,
+            airAllowanceDB: 0.18,
+            maxFizzCutDB: 2.8,
+            maxSibilanceCutDB: 3.2,
+            maxMetallicCutDB: 2.8,
+            maxAirCutDB: 2.2
+          });
+          buffer = toneGuarded.buffer;
+          const sourceConstrained = applySourceConstrainedSibilanceRepair(buffer, sourceReferenceBuffer, {
+            amount: 0.86,
+            allowedIncrease: 0.018,
+            threshold: 0.018,
+            ratio: 0.28,
+            maxMix: 0.76,
+            bands: [
+              { freq: 2400, q: 0.8, weight: 0.28 },
+              { freq: 2800, q: 0.85, weight: 0.42 },
+              { freq: 3600, q: 0.9, weight: 0.58 },
+              { freq: 4200, q: 0.9, weight: 0.78 },
+              { freq: 6200, q: 1.05, weight: 1.0 },
+              { freq: 8300, q: 1.15, weight: 1.0 },
+              { freq: 11200, q: 0.95, weight: 0.82 }
+            ],
+            attackMs: 0.5,
+            releaseMs: 145
+          });
+          buffer = sourceConstrained.buffer;
+          const vocalBuzz = applySourceConstrainedVocalBuzzRepair(buffer, sourceReferenceBuffer, {
+            amount: 0.78,
+            allowedIncrease: 0.012,
+            threshold: 0.012,
+            ratio: 0.24,
+            maxMix: 0.62,
+            maxBandReduction: 0.58,
+            phaseSafe: true,
+            bands: [
+              { freq: 1900, q: 0.72, weight: 0.2 },
+              { freq: 2400, q: 0.8, weight: 0.42 },
+              { freq: 3000, q: 0.86, weight: 0.68 },
+              { freq: 3800, q: 0.92, weight: 0.78 },
+              { freq: 5000, q: 1.0, weight: 0.56 }
+            ],
+            attackMs: 0.85,
+            releaseMs: 135,
+            detectorAttackMs: 0.45,
+            detectorReleaseMs: 38
+          });
+          buffer = vocalBuzz.buffer;
+          const guarded = applyAddedSibilanceGuard(buffer, sourceReferenceBuffer, {
+            amount: 0.82,
+            threshold: 0.018,
+            allowedIncrease: 0.04,
+            ratio: 0.32,
+            maxCutDB: 5.2,
+            airCutDB: 2.6,
+            detectorQ: 1.0,
+            attackMs: 0.3,
+            releaseMs: 120
+          });
+          buffer = guarded.buffer;
+          const finalVocalBuzz = applySourceConstrainedVocalBuzzRepair(buffer, sourceReferenceBuffer, {
+            amount: 0.76,
+            allowedIncrease: 0.01,
+            threshold: 0.011,
+            ratio: 0.24,
+            maxMix: 0.6,
+            maxBandReduction: 0.56,
+            phaseSafe: true,
+            bands: [
+              { freq: 1400, q: 0.66, weight: 0.1 },
+              { freq: 1800, q: 0.7, weight: 0.2 },
+              { freq: 2200, q: 0.76, weight: 0.38 },
+              { freq: 2900, q: 0.84, weight: 0.7 },
+              { freq: 3700, q: 0.92, weight: 0.84 },
+              { freq: 4800, q: 1.0, weight: 0.68 },
+              { freq: 6200, q: 1.06, weight: 0.5 },
+              { freq: 7800, q: 1.08, weight: 0.34 }
+            ],
+            attackMs: 0.95,
+            releaseMs: 145,
+            detectorAttackMs: 0.5,
+            detectorReleaseMs: 42
+          });
+          buffer = finalVocalBuzz.buffer;
+          chainDebug.sourceDifferentialToneGuard = toneGuarded.moves || null;
+          chainDebug.postSafetySourceConstrainedSibilanceRepair = sourceConstrained.moves || null;
+          chainDebug.postSafetySourceConstrainedVocalBuzzRepair = vocalBuzz.moves || null;
+          chainDebug.postSafetySourceDifferentialSibilanceGuard = guarded.moves || null;
+          chainDebug.finalSourceConstrainedVocalBuzzRepair = finalVocalBuzz.moves || null;
         }
 
         // Measure final LUFS

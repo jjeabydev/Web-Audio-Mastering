@@ -6,6 +6,12 @@ import {
   applyReferenceMatch,
   applyStereoStabilityGuard,
   applyPianoHighArtifactSuppressor,
+  applyVocalMidCrackleSuppressor,
+  applyDynamicSibilanceSuppressor,
+  applyAddedSibilanceGuard,
+  applySourceDifferentialToneGuard,
+  applySourceConstrainedSibilanceRepair,
+  applySourceConstrainedVocalBuzzRepair,
   applyMetallicRescueTone,
   applyArtifactSafeAirRecovery,
   chooseAIMasteringProfile,
@@ -61,6 +67,16 @@ function rmsDiff(a, b) {
     sum += diff * diff;
   }
   return Math.sqrt(sum / a.length);
+}
+
+function windowRms(data, start, end) {
+  let sum = 0;
+  let count = 0;
+  for (let i = start; i < end; i++) {
+    sum += data[i] * data[i];
+    count++;
+  }
+  return Math.sqrt(sum / Math.max(1, count));
 }
 
 function makeWidePhaseBuffer({ sampleRate = 48000, seconds = 1 }) {
@@ -624,6 +640,25 @@ describe('AI-generated mastering repair', () => {
     expect(Number.isFinite(recommendation.artifactProtection)).toBe(true);
   });
 
+  it('keeps harmonic tape warmth off for normal AI auto vocal masters', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [160, 0.06],
+        [780, 0.055],
+        [1800, 0.04],
+        [3300, 0.025],
+        [7200, 0.012]
+      ]
+    });
+    const recommendation = getAIMasteringRecommendation(
+      analyzeAIGeneratedMastering(buffer),
+      { isLossy: false }
+    );
+
+    expect(recommendation.tapeWarmth).toBe(false);
+    expect(recommendation.addAir).toBe(false);
+  });
+
   it('uses clarity without forced air for dark but safe lossy sources', () => {
     const buffer = makeToneBuffer({
       frequencies: [
@@ -683,6 +718,28 @@ describe('AI-generated mastering repair', () => {
     });
 
     expect(findTruePeak(calibrated.buffer)).toBeLessThanOrEqual(-0.95);
+  });
+
+  it('can cap transparent final calibration to one gentle boost pass', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [220, 0.02],
+        [1200, 0.012],
+        [6400, 0.006]
+      ]
+    });
+    const before = windowRms(buffer.getChannelData(0), 0, buffer.length);
+
+    const calibrated = finalizeMasteringTarget(buffer, {
+      targetLufs: -8,
+      ceilingDB: -1.5,
+      toleranceDB: 0.1,
+      maxLimiterPushDB: 0.45,
+      maxPasses: 1
+    });
+    const after = windowRms(calibrated.buffer.getChannelData(0), 0, calibrated.buffer.length);
+
+    expect(after / before).toBeLessThanOrEqual(Math.pow(10, 0.46 / 20));
   });
 
   it('suppresses isolated high-note piano crackle without dulling the tone', () => {
@@ -792,6 +849,633 @@ describe('AI-generated mastering repair', () => {
     expect(rmsDiff(before, after)).toBeLessThan(0.003);
   });
 
+  it('suppresses vocal mid-high crackle bursts without muting the vocal band', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [220, 0.05],
+        [880, 0.055],
+        [2600, 0.035],
+        [5200, 0.018]
+      ]
+    });
+    const channel = buffer.getChannelData(0);
+    const before = [9120, 9121, 9122, 9123].map((idx, n) => {
+      channel[idx] += n % 2 === 0 ? 0.052 : -0.049;
+      return channel[idx];
+    });
+
+    const repaired = applyVocalMidCrackleSuppressor(buffer, {
+      amount: 0.8,
+      sensitivity: 0.9
+    });
+    const out = repaired.getChannelData(0);
+
+    expect(Math.abs(out[9120] - before[0])).toBeGreaterThan(0.006);
+    expect(Math.abs(out[9121] - before[1])).toBeGreaterThan(0.006);
+    expect(Math.abs(out[9122] - before[2])).toBeGreaterThan(0.006);
+    expect(Math.abs(out[3000] - channel[3000])).toBeLessThan(0.004);
+  });
+
+  it('leaves clean vocal mid-high tone mostly unchanged', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [240, 0.05],
+        [1200, 0.045],
+        [3200, 0.026],
+        [5600, 0.012]
+      ]
+    });
+    const before = buffer.getChannelData(0).slice();
+    const repaired = applyVocalMidCrackleSuppressor(buffer, {
+      amount: 0.7,
+      sensitivity: 0.82
+    });
+    const after = repaired.getChannelData(0);
+
+    expect(rmsDiff(before, after)).toBeLessThan(0.0025);
+  });
+
+  it('reduces a short vocal tail crackle cluster', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [180, 0.045],
+        [620, 0.052],
+        [1450, 0.04],
+        [3100, 0.028],
+        [5400, 0.012]
+      ]
+    });
+    const channel = buffer.getChannelData(0);
+    const center = 14400;
+    const injected = [];
+    for (let n = -4; n <= 4; n++) {
+      const idx = center + n;
+      const burst = (n % 2 === 0 ? 1 : -1) * (0.022 + Math.max(0, 4 - Math.abs(n)) * 0.003);
+      channel[idx] += burst;
+      injected.push([idx, channel[idx]]);
+    }
+
+    const repaired = applyVocalMidCrackleSuppressor(buffer, {
+      amount: 0.9,
+      sensitivity: 0.96,
+      clusterAmount: 0.48
+    });
+    const out = repaired.getChannelData(0);
+    const changed = injected.reduce((sum, [idx, before]) => sum + Math.abs(out[idx] - before), 0);
+
+    expect(changed).toBeGreaterThan(0.035);
+    expect(Math.abs(out[center + 80] - channel[center + 80])).toBeLessThan(0.004);
+  });
+
+  it('dynamically reduces added sibilance bursts after final polish', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [190, 0.05],
+        [760, 0.055],
+        [1800, 0.04],
+        [3300, 0.028]
+      ]
+    });
+    const channel = buffer.getChannelData(0);
+    const start = 16000;
+    const end = start + 360;
+    for (let i = start; i < end; i++) {
+      const t = (i - start) / buffer.sampleRate;
+      const envelope = Math.sin(Math.PI * (i - start) / (end - start));
+      channel[i] += Math.sin(2 * Math.PI * 7600 * t) * 0.11 * envelope;
+    }
+
+    const before = windowRms(channel, start, end);
+    const repaired = applyDynamicSibilanceSuppressor(buffer, {
+      amount: 0.9,
+      threshold: 0.28,
+      maxCutDB: 4.5,
+      airCutDB: 2.4,
+      detectorFreq: 3900
+    });
+    const after = repaired.buffer.getChannelData(0);
+    let changed = 0;
+    for (let i = start; i < end; i++) {
+      changed += Math.abs(after[i] - channel[i]);
+    }
+
+    expect(repaired.moves.activeRatio).toBeGreaterThan(0);
+    expect(windowRms(after, start, end)).toBeLessThan(before * 0.9);
+    expect(changed / (end - start)).toBeGreaterThan(0.0015);
+  });
+
+  it('leaves clean non-sibilant vocal tone mostly unchanged', () => {
+    const buffer = makeToneBuffer({
+      frequencies: [
+        [220, 0.055],
+        [880, 0.052],
+        [1700, 0.04],
+        [3200, 0.018]
+      ]
+    });
+    const before = buffer.getChannelData(0).slice();
+    const repaired = applyDynamicSibilanceSuppressor(buffer, {
+      amount: 0.8,
+      threshold: 0.34,
+      detectorFreq: 3900
+    });
+    const after = repaired.buffer.getChannelData(0);
+
+    expect(rmsDiff(before, after)).toBeLessThan(0.0015);
+  });
+
+  it('reduces sibilance that was added by processing but is not in the source', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [180, 0.06],
+        [720, 0.05],
+        [1600, 0.038],
+        [3100, 0.022]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [180, 0.06],
+        [720, 0.05],
+        [1600, 0.038],
+        [3100, 0.022]
+      ]
+    });
+    const channel = processed.getChannelData(0);
+    const start = 18000;
+    const end = start + 420;
+    for (let i = start; i < end; i++) {
+      const t = (i - start) / processed.sampleRate;
+      const envelope = Math.sin(Math.PI * (i - start) / (end - start));
+      channel[i] += Math.sin(2 * Math.PI * 7200 * t) * 0.095 * envelope;
+    }
+
+    const before = windowRms(channel, start, end);
+    const guarded = applyAddedSibilanceGuard(processed, source, {
+      amount: 0.95,
+      threshold: 0.015,
+      allowedIncrease: 0.02,
+      maxCutDB: 5.5,
+      airCutDB: 2.8
+    });
+    const after = guarded.buffer.getChannelData(0);
+
+    expect(guarded.moves.activeRatio).toBeGreaterThan(0);
+    expect(windowRms(after, start, end)).toBeLessThan(before * 0.88);
+    expect(Math.abs(after[4000] - processed.getChannelData(0)[4000])).toBeLessThan(0.001);
+  });
+
+  it('does not remove sibilance that already exists in the source', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [220, 0.052],
+        [900, 0.048],
+        [2600, 0.026]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [220, 0.052],
+        [900, 0.048],
+        [2600, 0.026]
+      ]
+    });
+    for (const buffer of [source, processed]) {
+      const channel = buffer.getChannelData(0);
+      const start = 12000;
+      const end = start + 300;
+      for (let i = start; i < end; i++) {
+        const t = (i - start) / buffer.sampleRate;
+        const envelope = Math.sin(Math.PI * (i - start) / (end - start));
+        channel[i] += Math.sin(2 * Math.PI * 7400 * t) * 0.07 * envelope;
+      }
+    }
+
+    const before = processed.getChannelData(0).slice();
+    const guarded = applyAddedSibilanceGuard(processed, source, {
+      amount: 0.95,
+      threshold: 0.015,
+      allowedIncrease: 0.02
+    });
+    const after = guarded.buffer.getChannelData(0);
+
+    expect(rmsDiff(before, after)).toBeLessThan(0.0015);
+  });
+
+  it('constrains processing-added sibilance toward the clean source band', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [170, 0.055],
+        [740, 0.05],
+        [1550, 0.038],
+        [2900, 0.024]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [170, 0.055],
+        [740, 0.05],
+        [1550, 0.038],
+        [2900, 0.024]
+      ]
+    });
+    const sourceChannel = source.getChannelData(0);
+    const processedChannel = processed.getChannelData(0);
+    const start = 15000;
+    const end = start + 520;
+    for (let i = start; i < end; i++) {
+      const t = (i - start) / processed.sampleRate;
+      const envelope = Math.sin(Math.PI * (i - start) / (end - start));
+      processedChannel[i] += (
+        Math.sin(2 * Math.PI * 6200 * t) * 0.07 +
+        Math.sin(2 * Math.PI * 8500 * t) * 0.05
+      ) * envelope;
+    }
+
+    const beforeDistance = windowRms(processedChannel, start, end) - windowRms(sourceChannel, start, end);
+    const repaired = applySourceConstrainedSibilanceRepair(processed, source, {
+      amount: 1,
+      allowedIncrease: 0.01,
+      threshold: 0.01,
+      ratio: 0.22,
+      maxMix: 0.82
+    });
+    const after = repaired.buffer.getChannelData(0);
+    const afterDistance = windowRms(after, start, end) - windowRms(sourceChannel, start, end);
+
+    expect(repaired.moves.activeRatio).toBeGreaterThan(0);
+    expect(afterDistance).toBeLessThan(beforeDistance * 0.55);
+    expect(Math.abs(after[4000] - processedChannel[4000])).toBeLessThan(0.0015);
+  });
+
+  it('leaves source-matched sibilance mostly unchanged in source-constrained repair', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [220, 0.05],
+        [820, 0.046],
+        [2500, 0.026]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [220, 0.05],
+        [820, 0.046],
+        [2500, 0.026]
+      ]
+    });
+    for (const buffer of [source, processed]) {
+      const channel = buffer.getChannelData(0);
+      const start = 9000;
+      const end = start + 420;
+      for (let i = start; i < end; i++) {
+        const t = (i - start) / buffer.sampleRate;
+        const envelope = Math.sin(Math.PI * (i - start) / (end - start));
+        channel[i] += Math.sin(2 * Math.PI * 6900 * t) * 0.06 * envelope;
+      }
+    }
+
+    const before = processed.getChannelData(0).slice();
+    const repaired = applySourceConstrainedSibilanceRepair(processed, source, {
+      amount: 1,
+      allowedIncrease: 0.01,
+      threshold: 0.01,
+      maxMix: 0.82
+    });
+    const after = repaired.buffer.getChannelData(0);
+
+    expect(rmsDiff(before, after)).toBeLessThan(0.0015);
+  });
+
+  it('reduces short vocal-band buzz added by processing but absent from the source', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [180, 0.06],
+        [760, 0.05],
+        [1450, 0.036],
+        [2600, 0.022]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [180, 0.06],
+        [760, 0.05],
+        [1450, 0.036],
+        [2600, 0.022]
+      ]
+    });
+    const sourceChannel = source.getChannelData(0);
+    const processedChannel = processed.getChannelData(0);
+    const start = 21000;
+    const end = start + 360;
+    for (let i = start; i < end; i++) {
+      const t = (i - start) / processed.sampleRate;
+      const envelope = Math.sin(Math.PI * (i - start) / (end - start));
+      processedChannel[i] += (
+        Math.sin(2 * Math.PI * 3300 * t) * 0.045 +
+        (i % 2 === 0 ? 1 : -1) * 0.018
+      ) * envelope;
+    }
+
+    const beforeDistance = windowRms(processedChannel, start, end) - windowRms(sourceChannel, start, end);
+    const repaired = applySourceConstrainedVocalBuzzRepair(processed, source, {
+      amount: 1,
+      allowedIncrease: 0.01,
+      threshold: 0.008,
+      ratio: 0.18,
+      maxMix: 0.82
+    });
+    const after = repaired.buffer.getChannelData(0);
+    const afterDistance = windowRms(after, start, end) - windowRms(sourceChannel, start, end);
+
+    expect(repaired.moves.activeRatio).toBeGreaterThan(0);
+    expect(afterDistance).toBeLessThan(beforeDistance * 0.72);
+    expect(Math.abs(after[6000] - processedChannel[6000])).toBeLessThan(0.0015);
+  });
+
+  it('leaves source-matched vocal buzz mostly unchanged', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [200, 0.058],
+        [840, 0.048],
+        [2400, 0.024]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [200, 0.058],
+        [840, 0.048],
+        [2400, 0.024]
+      ]
+    });
+    for (const buffer of [source, processed]) {
+      const channel = buffer.getChannelData(0);
+      const start = 17000;
+      const end = start + 340;
+      for (let i = start; i < end; i++) {
+        const t = (i - start) / buffer.sampleRate;
+        const envelope = Math.sin(Math.PI * (i - start) / (end - start));
+        channel[i] += Math.sin(2 * Math.PI * 3400 * t) * 0.035 * envelope;
+      }
+    }
+
+    const before = processed.getChannelData(0).slice();
+    const repaired = applySourceConstrainedVocalBuzzRepair(processed, source, {
+      amount: 1,
+      allowedIncrease: 0.01,
+      threshold: 0.008,
+      maxMix: 0.82
+    });
+    const after = repaired.buffer.getChannelData(0);
+
+    expect(rmsDiff(before, after)).toBeLessThan(0.0018);
+  });
+
+  it('reduces consonant-transition buzz across vocal phrase bands', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [190, 0.056],
+        [720, 0.047],
+        [1350, 0.035],
+        [2300, 0.024],
+        [3600, 0.014]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [190, 0.056],
+        [720, 0.047],
+        [1350, 0.035],
+        [2300, 0.024],
+        [3600, 0.014]
+      ]
+    });
+    const sourceChannel = source.getChannelData(0);
+    const processedChannel = processed.getChannelData(0);
+
+    for (const start of [14500, 23800, 31800]) {
+      const end = start + 390;
+      for (let i = start; i < end; i++) {
+        const t = (i - start) / processed.sampleRate;
+        const envelope = Math.sin(Math.PI * (i - start) / (end - start));
+        processedChannel[i] += (
+          Math.sin(2 * Math.PI * 2800 * t) * 0.026 +
+          Math.sin(2 * Math.PI * 4100 * t) * 0.024 +
+          (i % 3 === 0 ? 1 : -0.5) * 0.014
+        ) * envelope;
+      }
+    }
+
+    const beforeDistance = windowRms(processedChannel, 14000, 32500) - windowRms(sourceChannel, 14000, 32500);
+    const repaired = applySourceConstrainedVocalBuzzRepair(processed, source, {
+      amount: 1,
+      allowedIncrease: 0.008,
+      threshold: 0.006,
+      ratio: 0.18,
+      maxMix: 0.84
+    });
+    const after = repaired.buffer.getChannelData(0);
+    const afterDistance = windowRms(after, 14000, 32500) - windowRms(sourceChannel, 14000, 32500);
+
+    expect(repaired.moves.activeRatio).toBeGreaterThan(0);
+    expect(afterDistance).toBeLessThan(beforeDistance * 0.76);
+  });
+
+  it('reduces metallic buzz on plucked guitar-like transients', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [110, 0.045],
+        [220, 0.036],
+        [440, 0.028],
+        [880, 0.02],
+        [1760, 0.014]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [110, 0.045],
+        [220, 0.036],
+        [440, 0.028],
+        [880, 0.02],
+        [1760, 0.014]
+      ]
+    });
+    const sourceChannel = source.getChannelData(0);
+    const processedChannel = processed.getChannelData(0);
+
+    for (const start of [9000, 18400, 27600]) {
+      const end = start + 520;
+      for (let i = start; i < end; i++) {
+        const t = (i - start) / processed.sampleRate;
+        const envelope = Math.exp(-(i - start) / 160) * Math.sin(Math.PI * (i - start) / (end - start));
+        processedChannel[i] += (
+          Math.sin(2 * Math.PI * 3300 * t) * 0.034 +
+          Math.sin(2 * Math.PI * 6200 * t) * 0.026
+        ) * envelope;
+      }
+    }
+
+    const beforeDistance = windowRms(processedChannel, 8500, 28200) - windowRms(sourceChannel, 8500, 28200);
+    const repaired = applySourceConstrainedVocalBuzzRepair(processed, source, {
+      amount: 1,
+      allowedIncrease: 0.008,
+      threshold: 0.006,
+      ratio: 0.18,
+      maxMix: 0.84
+    });
+    const after = repaired.buffer.getChannelData(0);
+    const afterDistance = windowRms(after, 8500, 28200) - windowRms(sourceChannel, 8500, 28200);
+
+    expect(repaired.moves.activeRatio).toBeGreaterThan(0);
+    expect(afterDistance).toBeLessThan(beforeDistance * 0.78);
+  });
+
+  it('reduces low-level sibilant fizz bed added across the whole master', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [180, 0.06],
+        [760, 0.05],
+        [1600, 0.034],
+        [2600, 0.02]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [180, 0.06],
+        [760, 0.05],
+        [1600, 0.034],
+        [2600, 0.02]
+      ]
+    });
+    const sourceChannel = source.getChannelData(0);
+    const processedChannel = processed.getChannelData(0);
+    for (let i = 0; i < processed.length; i++) {
+      const t = i / processed.sampleRate;
+      processedChannel[i] += (
+        Math.sin(2 * Math.PI * 6200 * t) * 0.005 +
+        Math.sin(2 * Math.PI * 7800 * t) * 0.004 +
+        (i % 2 === 0 ? 1 : -1) * 0.002
+      );
+    }
+
+    const beforeDistance = windowRms(processedChannel, 0, processed.length) - windowRms(sourceChannel, 0, source.length);
+    const repaired = applySourceConstrainedVocalBuzzRepair(processed, source, {
+      amount: 1,
+      allowedIncrease: 0.006,
+      threshold: 0.005,
+      ratio: 0.16,
+      maxMix: 0.76
+    });
+    const after = repaired.buffer.getChannelData(0);
+    const afterDistance = windowRms(after, 0, after.length) - windowRms(sourceChannel, 0, source.length);
+
+    expect(repaired.moves.activeRatio).toBeGreaterThan(0);
+    expect(afterDistance).toBeLessThan(beforeDistance * 0.82);
+  });
+
+  it('does not build up new vocal fizz when the source-constrained repair is repeated', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [170, 0.058],
+        [690, 0.048],
+        [1420, 0.034],
+        [2500, 0.022],
+        [3900, 0.012]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [170, 0.058],
+        [690, 0.048],
+        [1420, 0.034],
+        [2500, 0.022],
+        [3900, 0.012]
+      ]
+    });
+    const sourceChannel = source.getChannelData(0);
+    const processedChannel = processed.getChannelData(0);
+    for (const start of [11000, 19400, 28700, 36500]) {
+      const end = start + 430;
+      for (let i = start; i < end; i++) {
+        const t = (i - start) / processed.sampleRate;
+        const envelope = Math.sin(Math.PI * (i - start) / (end - start));
+        processedChannel[i] += (
+          Math.sin(2 * Math.PI * 3100 * t) * 0.018 +
+          Math.sin(2 * Math.PI * 5300 * t) * 0.014 +
+          (i % 2 === 0 ? 1 : -1) * 0.007
+        ) * envelope;
+      }
+    }
+
+    const beforeDistance = windowRms(processedChannel, 10000, 37000) - windowRms(sourceChannel, 10000, 37000);
+    const first = applySourceConstrainedVocalBuzzRepair(processed, source, {
+      amount: 0.78,
+      allowedIncrease: 0.01,
+      threshold: 0.011,
+      ratio: 0.24,
+      maxMix: 0.62,
+      maxBandReduction: 0.58,
+      phaseSafe: true,
+      attackMs: 0.85,
+      releaseMs: 135
+    });
+    const second = applySourceConstrainedVocalBuzzRepair(first.buffer, source, {
+      amount: 0.76,
+      allowedIncrease: 0.01,
+      threshold: 0.011,
+      ratio: 0.24,
+      maxMix: 0.6,
+      maxBandReduction: 0.56,
+      phaseSafe: true,
+      attackMs: 0.95,
+      releaseMs: 145
+    });
+    const firstChannel = first.buffer.getChannelData(0);
+    const secondChannel = second.buffer.getChannelData(0);
+    const firstDistance = windowRms(firstChannel, 10000, 37000) - windowRms(sourceChannel, 10000, 37000);
+    const secondDistance = windowRms(secondChannel, 10000, 37000) - windowRms(sourceChannel, 10000, 37000);
+
+    expect(first.moves.activeRatio).toBeGreaterThan(0);
+    expect(firstDistance).toBeLessThan(beforeDistance * 0.86);
+    expect(secondDistance).toBeLessThanOrEqual(firstDistance * 1.05);
+    expect(rmsDiff(firstChannel, secondChannel)).toBeLessThan(0.004);
+  });
+
+  it('reduces broad added fizz tone compared with the source', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [180, 0.08],
+        [850, 0.06],
+        [2200, 0.035],
+        [4200, 0.01]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [180, 0.08],
+        [850, 0.06],
+        [2200, 0.035],
+        [3900, 0.035],
+        [7600, 0.042],
+        [10500, 0.032]
+      ]
+    });
+
+    const before = analyzeAIGeneratedMastering(processed);
+    const guarded = applySourceDifferentialToneGuard(processed, source, {
+      amount: 1,
+      presenceAllowanceDB: 0.05,
+      harshAllowanceDB: 0.05,
+      metallicAllowanceDB: 0.05,
+      airAllowanceDB: 0.05
+    });
+    const after = analyzeAIGeneratedMastering(guarded.buffer);
+
+    expect(guarded.moves.skipped).toBe(false);
+    expect(guarded.moves.sibilanceCut).toBeLessThan(0);
+    expect(after.profile.harshDB).toBeLessThan(before.profile.harshDB);
+    expect(after.profile.metallicDB).toBeLessThan(before.profile.metallicDB);
+  });
+
   it('adds gentle air recovery only when artifact-safe audio is dark and not metallic', () => {
     const darkSafe = makeToneBuffer({
       frequencies: [
@@ -831,19 +1515,54 @@ describe('AI-generated mastering repair', () => {
     const gentle = applyArtifactSafeAirRecovery(darkSafe, { amount: 1 });
     const open = applyArtifactSafeAirRecovery(darkSafe, {
       amount: 1,
-      targetAirDB: -10.8,
-      airScale: 1.24,
-      safeAirThresholdDB: -12.8,
-      safeSpikeDensity: 0.024,
-      maxAirShelf: 6.8,
-      maxSpikeIncrease: 0.009,
-      absoluteSpikeFloor: 0.025,
-      maxHarshDB: -11.4,
-      maxMetallicDB: -14.8
+      targetAirDB: -12.9,
+      airScale: 0.82,
+      safeAirThresholdDB: -13.6,
+      safeSpikeDensity: 0.015,
+      maxAirShelf: 4,
+      presenceScale: 0.11,
+      intelligibilityScale: 0.08,
+      maxPresenceLift: 0.45,
+      maxIntelligibilityLift: 0.25,
+      maxSpikeIncrease: 0.0028,
+      absoluteSpikeFloor: 0.0145,
+      maxHarshDB: -12.9,
+      maxMetallicDB: -17
     });
 
     expect(gentle.moves.skipped).toBe(false);
     expect(open.moves.skipped).toBe(false);
     expect(open.moves.airShelf).toBeGreaterThan(gentle.moves.airShelf);
+  });
+
+  it('honors zero lift options during artifact-safe air recovery', () => {
+    const darkSafe = makeToneBuffer({
+      frequencies: [
+        [180, 0.1],
+        [900, 0.08],
+        [4200, 0.015],
+        [12500, 0.004]
+      ]
+    });
+
+    const recovered = applyArtifactSafeAirRecovery(darkSafe, {
+      amount: 0.2,
+      targetAirDB: -15,
+      airScale: 0,
+      minAirShelf: 0,
+      maxAirShelf: 0,
+      presenceScale: 0,
+      maxPresenceLift: 0,
+      intelligibilityScale: 0,
+      maxIntelligibilityLift: 0,
+      safeAirThresholdDB: -14.8,
+      safeSpikeDensity: 0.02
+    });
+
+    expect(recovered.moves.skipped).toBe(false);
+    expect(recovered.moves.airShelf).toBe(0);
+    expect(recovered.moves.presenceLift).toBe(0);
+    expect(recovered.moves.intelligibilityLift).toBe(0);
+    expect(rmsDiff(darkSafe.getChannelData(0), recovered.buffer.getChannelData(0))).toBeLessThan(0.00001);
   });
 });

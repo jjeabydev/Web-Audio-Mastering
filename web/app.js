@@ -6,7 +6,6 @@ import {
   measureLUFS,
   findTruePeak,
   applyLookaheadLimiter,
-  normalizeToLUFS,
   applyGain,
   analyzeAIGeneratedMastering,
   chooseAIMasteringProfile,
@@ -668,9 +667,7 @@ function applyLiveChainParams() {
   applyPreviewApproximation();
 
   // Glue Compression
-  const artifactSafeMode = /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentFile?.name || '') ||
-    Number(artifactProtection?.value || 0) >= 78 ||
-    Number(sibilanceProtection?.value || 0) >= 75;
+  const artifactSafeMode = aiEnhance?.checked ?? true;
   if (glueCompression.checked && !playerState.isBypassed && !artifactSafeMode) {
     audioNodes.compressor.threshold.value = -14;
     audioNodes.compressor.knee.value = 24;
@@ -723,9 +720,7 @@ function applyPreviewApproximation() {
 
   try {
     const settings = getCurrentSettings();
-    const transparentSafeMode = settings.isLossySource ||
-      (settings.artifactProtection ?? 0) >= 0.78 ||
-      (settings.sibilanceProtection ?? 0) >= 0.75;
+    const transparentSafeMode = settings.aiEnhance !== false;
     if (transparentSafeMode) {
       reset();
       return;
@@ -838,9 +833,7 @@ function connectDirectToOutput(source) {
 }
 
 function isCurrentArtifactSafeSource() {
-  return /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentFile?.name || '') ||
-    Number(artifactProtection?.value || 0) >= 78 ||
-    Number(sibilanceProtection?.value || 0) >= 75;
+  return aiEnhance?.checked ?? true;
 }
 
 function getBypassPlaybackBuffer() {
@@ -1306,11 +1299,11 @@ async function loadAudioFile(file) {
     const arrayBuffer = await file.arrayBuffer();
 
     // Create blob from original file data immediately (for WaveSurfer)
-    const originalBlob = new Blob([arrayBuffer], { type: file.type || 'audio/mpeg' });
+    const originalBlob = new Blob([arrayBuffer], { type: file.type || 'audio/wav' });
 
     showLoadingModal('Decoding audio...', 20);
 
-    // Decode audio using browser's native decoder (supports MP3, WAV, FLAC, AAC, M4A, MP4)
+    // Decode WAV using the browser's native decoder.
     let decodedBuffer;
     try {
       decodedBuffer = await ctx.decodeAudioData(arrayBuffer);
@@ -1395,24 +1388,14 @@ async function loadAudioFile(file) {
     clearReferenceState();
     applyAIAutoRecommendation(fileState.aiAnalysis, {
       bitrateKbps: fileState.estimatedBitrateKbps,
-      isLossy: /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(file.name)
+      isLossy: false
     }, { force: true });
 
-    const isLossySource = /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(file.name);
     const requestedTarget = Number.parseFloat(targetLufsSlider.value);
-    const rescuePreviewMode = Number(artifactProtection?.value || 0) >= 85;
-    const normalizedTarget = isLossySource
-      ? Math.min(Number.isFinite(requestedTarget) ? requestedTarget : targetLufsDb, rescuePreviewMode ? -14 : -14.5)
-      : (Number.isFinite(requestedTarget) ? requestedTarget : targetLufsDb);
-    let normalizedBuffer;
-    if (isLossySource) {
-      const desiredGainDB = Number.isFinite(originalLufs) ? normalizedTarget - originalLufs : 0;
-      const peakSafeGainDB = -1.8 - originalTruePeak;
-      normalizedBuffer = applyGain(decodedBuffer, Math.min(desiredGainDB, peakSafeGainDB));
-    } else {
-      // Normalize to target LUFS using pure JavaScript
-      normalizedBuffer = normalizeToLUFS(decodedBuffer, normalizedTarget);
-    }
+    const normalizedTarget = Math.min(Number.isFinite(requestedTarget) ? requestedTarget : targetLufsDb, -14);
+    const desiredGainDB = Number.isFinite(originalLufs) ? normalizedTarget - originalLufs : 0;
+    const peakSafeGainDB = -1.8 - originalTruePeak;
+    const normalizedBuffer = applyGain(decodedBuffer, Math.min(desiredGainDB, peakSafeGainDB));
 
     showLoadingModal('Applying normalization...', 70);
 
@@ -1493,7 +1476,7 @@ function playAudio() {
       if (!fileState.cachedRenderBuffer) {
         playBtn.disabled = true;
         scheduleRenderToCache({ immediate: true });
-        showToast('피아노 보호 렌더를 준비하는 중입니다. 잠시 후 다시 재생해 주세요.', '', 2500);
+        showToast('WAV 안전 렌더를 준비하는 중입니다. 잠시 후 다시 재생해 주세요.', '', 2500);
         return;
       }
       playbackBuffer = fileState.cachedRenderBuffer;
@@ -1921,13 +1904,13 @@ async function loadFile(file) {
 
 function isSupportedAudioFile(file) {
   if (!file) return false;
-  if (file.type?.startsWith('audio/')) return true;
-  return /\.(mp3|wav|flac|aac|m4a|mp4|ogg|wma|amr)$/i.test(file.name || '');
+  if (/\.wav$/i.test(file.name || '')) return true;
+  return /^(audio\/wav|audio\/x-wav|audio\/wave)$/i.test(file.type || '');
 }
 
 async function loadDroppedFile(file) {
   if (!isSupportedAudioFile(file)) {
-    showToast('Please drop a supported audio file.', 'error');
+    showToast('Please drop a WAV file.', 'error');
     return false;
   }
 
@@ -2003,6 +1986,49 @@ playBtn.addEventListener('click', () => {
     playAudio();
   }
 });
+
+function isTextEditingTarget(target) {
+  if (!target) return false;
+  if (target.isContentEditable) return true;
+  const tagName = target.tagName?.toLowerCase();
+  if (tagName === 'textarea') return true;
+  if (tagName !== 'input') return false;
+  const inputType = (target.type || 'text').toLowerCase();
+  return ['email', 'number', 'password', 'search', 'tel', 'text', 'url'].includes(inputType);
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.code !== 'Space' || isTextEditingTarget(event.target)) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation?.();
+
+  if (event.repeat) {
+    return;
+  }
+  if (!audioNodes.context || playBtn.disabled) {
+    return;
+  }
+
+  if (playerState.isPlaying) {
+    pauseAudio();
+  } else {
+    playAudio();
+  }
+}, true);
+
+document.addEventListener('keyup', (event) => {
+  if (event.code !== 'Space' || isTextEditingTarget(event.target)) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation?.();
+}, true);
 
 stopBtn.addEventListener('click', () => {
   stopAudio();
@@ -2352,6 +2378,7 @@ function summarizeExportSettings(settings) {
   return {
     aiEnhance: settings.aiEnhance,
     aiProfile: settings.aiProfile,
+    artifactRescueMode: settings.artifactRescueMode,
     aiIntensity: settings.aiIntensity,
     artifactProtection: settings.artifactProtection,
     sibilanceProtection: settings.sibilanceProtection,
@@ -2697,11 +2724,10 @@ function updateControlPanelSummary() {
   if (analysisActionValue) analysisActionValue.textContent = getAnalysisActionLabel();
   if (analysisSafeValue) {
     const safeOn = truePeakLimit.checked && cleanLowEnd.checked && centerBass.checked;
-    const lossySafe = !currentFile || !/\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentFile.name) || ceilingValueDb <= -1.4;
     const sourceHeadroom = getSourceHeadroomDB();
     const compensatedHeadroom = sourceHeadroom - Math.min(0, inputGainValue);
     const sourceProtected = !Number.isFinite(sourceHeadroom) || compensatedHeadroom >= 4 || inputGainValue <= -5.5;
-    analysisSafeValue.textContent = safeOn && lossySafe && sourceProtected ? 'On' : 'Check';
+    analysisSafeValue.textContent = safeOn && sourceProtected ? 'On' : 'Check';
   }
   if (modeTargetValue) modeTargetValue.textContent = `Target ${targetLufsSlider.value}`;
   if (modeProfileValue) modeProfileValue.textContent = `Profile ${getModeProfileLabel()}`;
@@ -2766,7 +2792,7 @@ const AI_MODE_DEFAULTS = {
     targetLufs: -12,
     limiterCharacter: 'balanced',
     addPunch: true,
-    tapeWarmth: true,
+    tapeWarmth: false,
     addAir: false,
     cutMud: false,
     stereoWidth: 100,
@@ -2787,7 +2813,7 @@ const AI_MODE_DEFAULTS = {
     targetLufs: -14,
     limiterCharacter: 'transparent',
     addPunch: false,
-    tapeWarmth: true,
+    tapeWarmth: false,
     addAir: false,
     cutMud: true,
     stereoWidth: 98,
@@ -2830,7 +2856,7 @@ const AI_MODE_DEFAULTS = {
     targetLufs: -10.5,
     limiterCharacter: 'dense',
     addPunch: true,
-    tapeWarmth: true,
+    tapeWarmth: false,
     addAir: false,
     cutMud: true,
     stereoWidth: 100,
@@ -2851,7 +2877,7 @@ const AI_MODE_DEFAULTS = {
     targetLufs: -12,
     limiterCharacter: 'balanced',
     addPunch: true,
-    tapeWarmth: true,
+    tapeWarmth: false,
     addAir: false,
     cutMud: false,
     stereoWidth: 100,
@@ -2883,37 +2909,24 @@ const AI_MODE_DEFAULTS = {
     centerBass: true,
     autoLevel: false
   },
-  universal: { aiProfile: 'universal', aiIntensity: 105, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 100 },
-  fire: { aiProfile: 'fire', aiIntensity: 110, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11, limiterCharacter: 'punch', addPunch: true, tapeWarmth: true, addAir: false, cutMud: true, stereoWidth: 100 },
-  clarity: { aiProfile: 'clarity', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: true, addAir: true, cutMud: true, stereoWidth: 100 },
+  universal: { aiProfile: 'universal', aiIntensity: 105, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: false, addAir: false, cutMud: false, stereoWidth: 100 },
+  fire: { aiProfile: 'fire', aiIntensity: 110, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11, limiterCharacter: 'punch', addPunch: true, tapeWarmth: false, addAir: false, cutMud: true, stereoWidth: 100 },
+  clarity: { aiProfile: 'clarity', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: false, addAir: false, cutMud: true, stereoWidth: 100 },
   tape: { aiProfile: 'tape', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 100 },
-  natural: { aiProfile: 'natural', aiIntensity: 95, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 100 },
-  spatial: { aiProfile: 'spatial', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 105 },
-  cinematic: { aiProfile: 'cinematic', aiIntensity: 100, sibilanceProtection: 65, artifactProtection: 70, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 102 },
-  punchy: { aiProfile: 'punchy', aiIntensity: 105, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11.5, limiterCharacter: 'punch', addPunch: true, tapeWarmth: true, addAir: false, cutMud: true, stereoWidth: 100 },
+  natural: { aiProfile: 'natural', aiIntensity: 95, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: false, addAir: false, cutMud: false, stereoWidth: 100 },
+  spatial: { aiProfile: 'spatial', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: false, addAir: false, cutMud: false, stereoWidth: 105 },
+  cinematic: { aiProfile: 'cinematic', aiIntensity: 100, sibilanceProtection: 65, artifactProtection: 70, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: false, addAir: false, cutMud: false, stereoWidth: 102 },
+  punchy: { aiProfile: 'punchy', aiIntensity: 105, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11.5, limiterCharacter: 'punch', addPunch: true, tapeWarmth: false, addAir: false, cutMud: true, stereoWidth: 100 },
   warm: { aiProfile: 'warm', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 100 },
-  vocal: { aiProfile: 'vocal', aiIntensity: 100, sibilanceProtection: 80, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: true, stereoWidth: 98 },
-  bass: { aiProfile: 'bass', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: true, addAir: false, cutMud: true, stereoWidth: 98 }
+  vocal: { aiProfile: 'vocal', aiIntensity: 100, sibilanceProtection: 80, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: false, addAir: false, cutMud: true, stereoWidth: 98 },
+  bass: { aiProfile: 'bass', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: false, addAir: false, cutMud: true, stereoWidth: 98 }
 };
 
 function refineModeDefaultsForCurrentSource(defaults) {
   const refined = { ...defaults };
   const analysis = fileState.aiAnalysis;
-  const currentName = currentFile?.name || '';
-  const isLossy = /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentName);
-  const isLowBitrate = isLossy && Number.isFinite(fileState.estimatedBitrateKbps) && fileState.estimatedBitrateKbps < 192;
-
-  if (isLossy) {
-    refined.truePeakCeiling = Math.min(refined.truePeakCeiling ?? -1, -1.5);
-    refined.sibilanceProtection = Math.max(refined.sibilanceProtection ?? 65, 75);
-    refined.artifactProtection = Math.max(refined.artifactProtection ?? 70, 80);
-    refined.targetLufs = Math.min(refined.targetLufs ?? -12, -14);
-    refined.limiterCharacter = 'transparent';
-    refined.addAir = false;
-    refined.addPunch = false;
-    refined.tapeWarmth = false;
-    refined.glueCompression = false;
-  }
+  const isLossy = false;
+  const isLowBitrate = false;
 
   if (!analysis) return refined;
 
@@ -3156,10 +3169,9 @@ function getArtifactSafeRecommendation(analysis, source = {}) {
 }
 
 function getCurrentSourceDescriptor() {
-  const currentName = currentFile?.name || fileState.selectedFilePath || '';
   return {
     bitrateKbps: fileState.estimatedBitrateKbps,
-    isLossy: /\.(mp3|aac|m4a|mp4|ogg|wma|amr)$/i.test(currentName)
+    isLossy: false
   };
 }
 
@@ -3526,26 +3538,19 @@ async function renormalizeAudio(newTargetLufs) {
     // bypass and live fallback close to the selected target.
     await new Promise(resolve => setTimeout(resolve, 0));
 
-    // Re-normalize to new target. Lossy/piano-risk sources use peak-safe gain only;
-    // limiter-based loudness normalization can create the metallic piano artifacts.
-    let normalizedBuffer;
-    const lossySource = isCurrentArtifactSafeSource();
-    if (lossySource) {
-      const currentLufs = Number.isFinite(fileState.originalLufs)
-        ? fileState.originalLufs
-        : measureLUFS(fileState.originalBuffer);
-      const currentPeak = Number.isFinite(fileState.originalTruePeak)
-        ? fileState.originalTruePeak
-        : findTruePeak(fileState.originalBuffer);
-      const rescuePreviewMode = Number(artifactProtection?.value || 0) >= 85;
-      const safeTarget = Math.min(newTargetLufs, rescuePreviewMode ? -14 : -14.5);
-      const desiredGainDB = Number.isFinite(currentLufs) ? safeTarget - currentLufs : 0;
-      const peakSafeGainDB = -1.8 - currentPeak;
-      normalizedBuffer = applyGain(fileState.originalBuffer, Math.min(desiredGainDB, peakSafeGainDB));
-      newTargetLufs = safeTarget;
-    } else {
-      normalizedBuffer = normalizeToLUFS(fileState.originalBuffer, newTargetLufs);
-    }
+    // WAV-only preview normalization: use peak-safe gain, never limiter-based
+    // loudness normalization, so preview cannot add new sibilant or crackle texture.
+    const currentLufs = Number.isFinite(fileState.originalLufs)
+      ? fileState.originalLufs
+      : measureLUFS(fileState.originalBuffer);
+    const currentPeak = Number.isFinite(fileState.originalTruePeak)
+      ? fileState.originalTruePeak
+      : findTruePeak(fileState.originalBuffer);
+    const safeTarget = Math.min(newTargetLufs, -14);
+    const desiredGainDB = Number.isFinite(currentLufs) ? safeTarget - currentLufs : 0;
+    const peakSafeGainDB = -1.8 - currentPeak;
+    const normalizedBuffer = applyGain(fileState.originalBuffer, Math.min(desiredGainDB, peakSafeGainDB));
+    newTargetLufs = safeTarget;
 
     // Update normalized buffer
     fileState.normalizedBuffer = normalizedBuffer;

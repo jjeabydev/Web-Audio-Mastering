@@ -73,8 +73,8 @@
           <div class="drop-icon">📂</div>
           <p>Drop audio file here or</p>
           <button id="selectFile" class="btn-select">Browse Files</button>
-          <input type="file" id="fileInput" accept="audio/*,.mp3,.wav,.flac,.aac,.m4a,.mp4" hidden>
-          <span class="file-types">MP3, WAV, FLAC, AAC, M4A, MP4</span>
+          <input type="file" id="fileInput" accept="audio/wav,.wav" hidden>
+          <span class="file-types">WAV only</span>
         </div>
         <div class="file-loaded hidden" id="fileLoaded">
           <div class="file-header">
@@ -245,7 +245,7 @@
             </div>
           </div>
           <label class="toggle-row"
-            data-tip="Automatic AI/MP3 mastering repair: adapts harshness, mud, low-end cleanup, clipper drive, and final loudness behavior.">
+            data-tip="Automatic WAV mastering: keeps source texture transparent while applying safe gain, low-end cleanup, and peak protection.">
             <span>AI Mastering</span>
             <input type="checkbox" id="aiEnhance" checked>
             <span class="toggle"></span>
@@ -298,7 +298,7 @@
             <button id="selectReference" class="mini-btn" type="button">Ref</button>
             <span id="referenceName" class="reference-name">No reference</span>
             <button id="clearReference" class="mini-btn ghost" type="button">Clear</button>
-            <input type="file" id="referenceInput" accept="audio/*,.mp3,.wav,.flac,.aac,.m4a,.mp4" hidden>
+            <input type="file" id="referenceInput" accept="audio/wav,.wav" hidden>
           </div>
           <div class="slider-row" data-tip="How strongly to follow the reference. Keep below 80% for safer mastering.">
             <span>Match</span>
@@ -381,7 +381,7 @@
           </div>
           <div class="output-presets">
             <button class="output-preset-btn active" data-preset="streaming"
-              data-tip="Recommended default. Exports a 24-bit WAV at the source sample rate, with a 44.1kHz minimum for low-rate MP3 sources.">Streaming</button>
+              data-tip="Recommended default. Exports a 24-bit WAV at the source sample rate, with a 44.1kHz minimum for compatibility.">Streaming</button>
             <button class="output-preset-btn" data-preset="cd"
               data-tip="Use only when a client, distributor, or CD workflow specifically asks for 44.1kHz/16-bit.">CD</button>
           </div>
@@ -460,7 +460,7 @@
             <div id="inputGainFader" class="fader-container"
               data-tip="If the source is already loud or clipped, lower Input to -5 or -6dB. If it is very quiet, raise it gently, but avoid red clipping."></div>
             <div id="ceilingFader" class="fader-container"
-              data-tip="Keep -1dB for MP3/AAC safety. Use -0.3dB only for high-quality WAV delivery where loudness matters more than codec safety."></div>
+              data-tip="Keep -1dB for safe release exports. Use -0.3dB only when loudness matters more than peak margin."></div>
           </div>
           <div class="loudness-toggles">
             <label class="toggle-row"

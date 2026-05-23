@@ -187,9 +187,15 @@ export {
   applyAIGeneratedMasteringRepair,
   applyMetallicRescueTone,
   applyArtifactSafeAirRecovery,
+  applyDynamicSibilanceSuppressor,
+  applyAddedSibilanceGuard,
+  applySourceDifferentialToneGuard,
+  applySourceConstrainedSibilanceRepair,
+  applySourceConstrainedVocalBuzzRepair,
   applyReferenceMatch,
   applyLimiterStressGuard,
   applyStereoStabilityGuard,
   applyPianoHighArtifactSuppressor,
+  applyVocalMidCrackleSuppressor,
   finalizeMasteringTarget
 } from './ai-mastering.js';

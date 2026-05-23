@@ -695,7 +695,7 @@ export function getAIGeneratedMasteringMoves(analysis, strength = 1, profile = A
   const tone = profile.tone || {};
   const sibilanceAmount = clamp(options.sibilanceProtection ?? 0.6, 0, 1);
   const artifactAmount = clamp(options.artifactProtection ?? 0.7, 0, 1);
-  const lossyProtected = Boolean(options.isLossySource) || artifactAmount >= 0.78 || sibilanceAmount >= 0.75;
+  const lossyProtected = Boolean(options.isLossySource) || Boolean(options.artifactRescueMode);
   const lowCutFreq = clamp(30 + Math.max(0, subToBassDB + 1) * 4, 30, 42);
   const fragileHighs = lossyProtected || (analysis.codecStress ?? 0) > 0.45 || harshDB > -11.5 || metallicDB > -13.5;
   const muffleRisk = clamp(
@@ -745,8 +745,7 @@ export function applyAIGeneratedMasteringRepair(buffer, options = {}) {
   const intensity = clamp(options.intensity ?? 1, 0.25, 1.75);
   const strength = clamp((options.strength ?? profile.repairStrength) * intensity, 0, 1.75);
   const transparentSafeMode = Boolean(options.isLossySource) ||
-    (options.artifactProtection ?? 0.7) >= 0.78 ||
-    (options.sibilanceProtection ?? 0.6) >= 0.75;
+    Boolean(options.artifactRescueMode);
 
   if (strength <= 0) {
     return { buffer, analysis, moves: null, profile };
@@ -755,7 +754,8 @@ export function applyAIGeneratedMasteringRepair(buffer, options = {}) {
   const moves = getAIGeneratedMasteringMoves(analysis, strength, profile, {
     sibilanceProtection: options.sibilanceProtection,
     artifactProtection: options.artifactProtection,
-    isLossySource: options.isLossySource
+    isLossySource: options.isLossySource,
+    artifactRescueMode: options.artifactRescueMode
   });
   let output = buffer;
 
@@ -842,9 +842,21 @@ export function applyArtifactSafeAirRecovery(buffer, options = {}) {
     return { buffer, analysis, moves: { airShelf: 0, presenceLift: 0, intelligibilityLift: 0, skipped: true } };
   }
 
-  const airShelf = clamp((targetAirDB - airDB) * (options.airScale ?? 0.72) * amount, options.minAirShelf ?? 0.45, options.maxAirShelf ?? 3.2);
-  const presenceLift = clamp((-12.9 - harshDB) * (options.presenceScale ?? 0.2) * amount, 0.08, options.maxPresenceLift ?? 0.85);
-  const intelligibilityLift = clamp((-3.9 - presenceToBodyDB) * (options.intelligibilityScale ?? 0.18) * amount, 0, options.maxIntelligibilityLift ?? 0.62);
+  const rawAirShelf = (targetAirDB - airDB) * (options.airScale ?? 0.72) * amount;
+  const rawPresenceLift = (-12.9 - harshDB) * (options.presenceScale ?? 0.2) * amount;
+  const rawIntelligibilityLift = (-3.9 - presenceToBodyDB) * (options.intelligibilityScale ?? 0.18) * amount;
+  const maxAirShelf = options.maxAirShelf ?? 3.2;
+  const maxPresenceLift = options.maxPresenceLift ?? 0.85;
+  const maxIntelligibilityLift = options.maxIntelligibilityLift ?? 0.62;
+  const airShelf = rawAirShelf > 0 && maxAirShelf > 0
+    ? clamp(rawAirShelf, options.minAirShelf ?? 0.45, maxAirShelf)
+    : 0;
+  const presenceLift = rawPresenceLift > 0 && maxPresenceLift > 0
+    ? clamp(rawPresenceLift, options.minPresenceLift ?? 0.08, maxPresenceLift)
+    : 0;
+  const intelligibilityLift = rawIntelligibilityLift > 0 && maxIntelligibilityLift > 0
+    ? clamp(rawIntelligibilityLift, options.minIntelligibilityLift ?? 0, maxIntelligibilityLift)
+    : 0;
   let output = applyFilterToBuffer(buffer, 'highshelf', 12500, airShelf, 0.65);
   if (presenceLift > 0.02) {
     output = applyFilterToBuffer(output, 'peaking', 4200, presenceLift, 0.9);
@@ -1164,6 +1176,792 @@ export function applyPianoHighArtifactSuppressor(buffer, options = {}) {
   return output;
 }
 
+export function applyVocalMidCrackleSuppressor(buffer, options = {}) {
+  const amount = clamp(options.amount ?? 0.58, 0, 1);
+  const sensitivity = clamp(options.sensitivity ?? 0.78, 0, 1);
+  const clusterAmount = clamp(options.clusterAmount ?? amount * 0.42, 0, 0.55);
+  if (!buffer || amount <= 0) return buffer;
+
+  const length = buffer.length;
+  const sampleRate = buffer.sampleRate;
+  const output = new AudioBuffer({
+    numberOfChannels: buffer.numberOfChannels,
+    length,
+    sampleRate
+  });
+  const shortWindow = Math.max(16, Math.round(sampleRate * 0.00055));
+  const longWindow = Math.max(shortWindow * 3, Math.round(sampleRate * 0.0022));
+  const shortHalf = Math.floor(shortWindow / 2);
+  const longHalf = Math.floor(longWindow / 2);
+  const absFloor = 0.0028;
+
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const input = buffer.getChannelData(ch);
+    const out = output.getChannelData(ch);
+    out.set(input);
+
+    let shortSum = 0;
+    let longSum = 0;
+    for (let i = 0; i < Math.min(length, shortWindow); i++) {
+      shortSum += Math.abs(input[i]);
+    }
+    for (let i = 0; i < Math.min(length, longWindow); i++) {
+      longSum += Math.abs(input[i]);
+    }
+
+    for (let i = 4; i < length - 4; i++) {
+      const shortRemoveIdx = i - shortHalf - 1;
+      const shortAddIdx = i + shortHalf;
+      if (shortRemoveIdx >= 0) shortSum -= Math.abs(input[shortRemoveIdx]);
+      if (shortAddIdx < length) shortSum += Math.abs(input[shortAddIdx]);
+
+      const longRemoveIdx = i - longHalf - 1;
+      const longAddIdx = i + longHalf;
+      if (longRemoveIdx >= 0) longSum -= Math.abs(input[longRemoveIdx]);
+      if (longAddIdx < length) longSum += Math.abs(input[longAddIdx]);
+
+      const shortAvg = shortSum / shortWindow;
+      const longAvg = longSum / longWindow;
+      const localAvg = Math.max(shortAvg, longAvg * 0.72);
+      const predicted = (
+        input[i - 4] +
+        input[i - 3] * 2 +
+        input[i - 2] * 3 +
+        input[i - 1] * 4 +
+        input[i + 1] * 4 +
+        input[i + 2] * 3 +
+        input[i + 3] * 2 +
+        input[i + 4]
+      ) / 20;
+      const residual = input[i] - predicted;
+      const curvature = Math.abs(input[i - 1] - input[i] * 2 + input[i + 1]);
+      const fastSlope = Math.abs(input[i] - input[i - 1]) + Math.abs(input[i] - input[i + 1]);
+      const slowSlope = Math.abs(input[i - 3] - input[i + 3]) / 6;
+      const alternating = (
+        Math.sign(input[i] - input[i - 1]) !== Math.sign(input[i + 1] - input[i]) ||
+        Math.sign(input[i - 1] - input[i - 2]) !== Math.sign(input[i] - input[i - 1])
+      );
+      const shortBurst = shortAvg > longAvg * (1.05 + sensitivity * 0.28);
+      const threshold = Math.max(absFloor, localAvg * (0.72 - sensitivity * 0.22));
+      const residualGate = threshold * (1.02 - sensitivity * 0.25);
+      const curvatureGate = threshold * (1.18 - sensitivity * 0.3);
+      const slopeGate = Math.max(threshold * 1.15, slowSlope * (5.2 - sensitivity * 1.5));
+      const crackleLike = alternating &&
+        Math.abs(residual) > residualGate &&
+        curvature > curvatureGate &&
+        fastSlope > slopeGate &&
+        (shortBurst || Math.abs(residual) > threshold * 1.8);
+
+      if (crackleLike) {
+        const residualLimit = Math.max(threshold * 0.72, longAvg * 0.24);
+        const limitedResidual = Math.sign(residual) * Math.min(Math.abs(residual), residualLimit);
+        const repaired = predicted + limitedResidual;
+        out[i] = input[i] * (1 - amount) + repaired * amount;
+
+        for (const j of [i - 1, i + 1]) {
+          const neighborPredicted = (
+            input[j - 2] +
+            input[j - 1] * 2 +
+            input[j + 1] * 2 +
+            input[j + 2]
+          ) / 6;
+          const neighborResidual = input[j] - neighborPredicted;
+          if (
+            Math.abs(neighborResidual) > residualGate * 0.55 &&
+            Math.sign(neighborResidual) !== Math.sign(residual)
+          ) {
+            const neighborLimitedResidual = Math.sign(neighborResidual) * Math.min(
+              Math.abs(neighborResidual),
+              residualLimit * 0.82
+            );
+            const neighborRepaired = neighborPredicted + neighborLimitedResidual;
+            const neighborAmount = amount * 0.45;
+            out[j] = out[j] * (1 - neighborAmount) + neighborRepaired * neighborAmount;
+          }
+        }
+      }
+    }
+
+    if (clusterAmount > 0) {
+      const firstPass = out.slice();
+      for (let i = 6; i < length - 6; i++) {
+        let residualSum = 0;
+        let curvatureSum = 0;
+        let alternatingCount = 0;
+        let localAbs = 0;
+
+        for (let k = -2; k <= 2; k++) {
+          const idx = i + k;
+          const predicted = (
+            firstPass[idx - 4] +
+            firstPass[idx - 3] * 2 +
+            firstPass[idx - 2] * 3 +
+            firstPass[idx - 1] * 4 +
+            firstPass[idx + 1] * 4 +
+            firstPass[idx + 2] * 3 +
+            firstPass[idx + 3] * 2 +
+            firstPass[idx + 4]
+          ) / 20;
+          const residual = firstPass[idx] - predicted;
+          const curvature = Math.abs(firstPass[idx - 1] - firstPass[idx] * 2 + firstPass[idx + 1]);
+          residualSum += Math.abs(residual);
+          curvatureSum += curvature;
+          localAbs += Math.abs(firstPass[idx]);
+
+          const slopeA = firstPass[idx] - firstPass[idx - 1];
+          const slopeB = firstPass[idx + 1] - firstPass[idx];
+          if (Math.sign(slopeA) !== Math.sign(slopeB)) {
+            alternatingCount++;
+          }
+        }
+
+        const localAvg = Math.max(localAbs / 5, absFloor);
+        const clusterThreshold = Math.max(absFloor * 3.2, localAvg * (1.72 - sensitivity * 0.42));
+        const curvatureThreshold = Math.max(absFloor * 2.4, localAvg * (1.36 - sensitivity * 0.35));
+        const clusterLike = alternatingCount >= 3 &&
+          residualSum > clusterThreshold &&
+          curvatureSum > curvatureThreshold;
+
+        if (clusterLike) {
+          for (let k = -2; k <= 2; k++) {
+            const idx = i + k;
+            const smoothed = (
+              firstPass[idx - 3] +
+              firstPass[idx - 2] * 2 +
+              firstPass[idx - 1] * 3 +
+              firstPass[idx] * 3 +
+              firstPass[idx + 1] * 3 +
+              firstPass[idx + 2] * 2 +
+              firstPass[idx + 3]
+            ) / 15;
+            const blend = clusterAmount * (k === 0 ? 1 : 0.68);
+            out[idx] = out[idx] * (1 - blend) + smoothed * blend;
+          }
+        }
+      }
+    }
+  }
+
+  return output;
+}
+
+export function applyDynamicSibilanceSuppressor(buffer, options = {}) {
+  const amount = clamp(options.amount ?? 0.55, 0, 1);
+  if (!buffer || amount <= 0) {
+    return { buffer, moves: null };
+  }
+
+  const sampleRate = buffer.sampleRate;
+  const length = buffer.length;
+  const output = createBufferLike(buffer);
+  const maxCutDB = options.maxCutDB ?? 2.8;
+  const airCutDB = options.airCutDB ?? 1.4;
+  const cutBuffer = applyFilterToBuffer(
+    applyFilterToBuffer(
+      applyFilterToBuffer(
+        applyFilterToBuffer(buffer, 'peaking', options.lowCenterFreq ?? 5100, -maxCutDB * 0.48, 1.05),
+        'peaking',
+        options.centerFreq ?? 7200,
+        -maxCutDB,
+        2.15
+      ),
+      'peaking',
+      options.airFreq ?? 9400,
+      -airCutDB,
+      1.55
+    ),
+    'highshelf',
+    options.shelfFreq ?? 11800,
+    -airCutDB * 0.58,
+    0.62
+  );
+  const detectorBuffer = applyFilterToBuffer(buffer, 'bandpass', options.centerFreq ?? 7200, 0.1, options.detectorQ ?? 1.05);
+  const attack = Math.exp(-1 / Math.max(1, sampleRate * ((options.attackMs ?? 0.45) / 1000)));
+  const release = Math.exp(-1 / Math.max(1, sampleRate * ((options.releaseMs ?? 76) / 1000)));
+  const detectorAttack = Math.exp(-1 / Math.max(1, sampleRate * ((options.detectorAttackMs ?? 0.35) / 1000)));
+  const detectorRelease = Math.exp(-1 / Math.max(1, sampleRate * ((options.detectorReleaseMs ?? 22) / 1000)));
+  const broadAttack = Math.exp(-1 / Math.max(1, sampleRate * ((options.broadAttackMs ?? 1.8) / 1000)));
+  const broadRelease = Math.exp(-1 / Math.max(1, sampleRate * ((options.broadReleaseMs ?? 90) / 1000)));
+  const ratioRange = Math.max(0.08, options.ratio ?? 0.52);
+  const threshold = options.threshold ?? 0.28;
+  const minBroad = options.minBroad ?? 0.004;
+  let activeSamples = 0;
+  let peakMix = 0;
+
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const input = buffer.getChannelData(ch);
+    const cut = cutBuffer.getChannelData(ch);
+    const detectorData = detectorBuffer.getChannelData(ch);
+    const out = output.getChannelData(ch);
+    let env = 0;
+    let detectorEnv = 0;
+    let broadEnv = 0;
+
+    for (let i = 0; i < length; i++) {
+      const detectorAbs = Math.abs(detectorData[i]);
+      const broadAbs = Math.abs(input[i]);
+      detectorEnv = detectorAbs > detectorEnv
+        ? detectorAttack * detectorEnv + (1 - detectorAttack) * detectorAbs
+        : detectorRelease * detectorEnv + (1 - detectorRelease) * detectorAbs;
+      broadEnv = broadAbs > broadEnv
+        ? broadAttack * broadEnv + (1 - broadAttack) * broadAbs
+        : broadRelease * broadEnv + (1 - broadRelease) * broadAbs;
+      const detectorRatio = detectorEnv / Math.max(minBroad, broadEnv);
+      const absoluteGate = clamp((detectorEnv - minBroad * 0.45) / Math.max(minBroad, minBroad * 1.4), 0, 1);
+      const target = clamp((detectorRatio - threshold) / ratioRange, 0, 1) * amount * absoluteGate;
+      env = target > env
+        ? attack * env + (1 - attack) * target
+        : release * env + (1 - release) * target;
+
+      if (env > 0.015) activeSamples++;
+      if (env > peakMix) peakMix = env;
+      out[i] = input[i] * (1 - env) + cut[i] * env;
+    }
+  }
+
+  return {
+    buffer: output,
+    moves: {
+      amount,
+      maxCutDB,
+      airCutDB,
+      activeRatio: activeSamples / Math.max(1, length * buffer.numberOfChannels),
+      peakMix
+    }
+  };
+}
+
+export function applyAddedSibilanceGuard(processedBuffer, sourceBuffer, options = {}) {
+  const amount = clamp(options.amount ?? 0.75, 0, 1);
+  if (!processedBuffer || !sourceBuffer || amount <= 0) {
+    return { buffer: processedBuffer, moves: null };
+  }
+  if (
+    processedBuffer.sampleRate !== sourceBuffer.sampleRate ||
+    processedBuffer.length !== sourceBuffer.length
+  ) {
+    return {
+      buffer: processedBuffer,
+      moves: { skipped: true, reason: 'source-mismatch' }
+    };
+  }
+
+  const channels = Math.min(processedBuffer.numberOfChannels, sourceBuffer.numberOfChannels);
+  const sampleRate = processedBuffer.sampleRate;
+  const length = processedBuffer.length;
+  const output = createBufferLike(processedBuffer);
+  const detectorQ = options.detectorQ ?? 1.05;
+  const processedLowDetector = applyFilterToBuffer(processedBuffer, 'bandpass', options.lowDetectorFreq ?? 4200, 0.1, detectorQ);
+  const processedMidDetector = applyFilterToBuffer(processedBuffer, 'bandpass', options.detectorFreq ?? 7200, 0.1, detectorQ);
+  const processedAirDetector = applyFilterToBuffer(processedBuffer, 'bandpass', options.airDetectorFreq ?? 10500, 0.1, options.airDetectorQ ?? 0.9);
+  const sourceLowDetector = applyFilterToBuffer(sourceBuffer, 'bandpass', options.lowDetectorFreq ?? 4200, 0.1, detectorQ);
+  const sourceMidDetector = applyFilterToBuffer(sourceBuffer, 'bandpass', options.detectorFreq ?? 7200, 0.1, detectorQ);
+  const sourceAirDetector = applyFilterToBuffer(sourceBuffer, 'bandpass', options.airDetectorFreq ?? 10500, 0.1, options.airDetectorQ ?? 0.9);
+  const cutBuffer = applyFilterToBuffer(
+    applyFilterToBuffer(
+      applyFilterToBuffer(
+        applyFilterToBuffer(processedBuffer, 'peaking', options.fizzCenterFreq ?? 3900, -(options.maxCutDB ?? 4.2) * 0.28, 0.95),
+        'peaking',
+        options.lowCenterFreq ?? 5200,
+        -(options.maxCutDB ?? 4.2) * 0.56,
+        1.05
+      ),
+      'peaking',
+      options.centerFreq ?? 7200,
+      -(options.maxCutDB ?? 4.2),
+      2.0
+    ),
+    'highshelf',
+    options.shelfFreq ?? 10500,
+    -(options.airCutDB ?? 2.1),
+    0.62
+  );
+  const attack = Math.exp(-1 / Math.max(1, sampleRate * ((options.attackMs ?? 0.35) / 1000)));
+  const release = Math.exp(-1 / Math.max(1, sampleRate * ((options.releaseMs ?? 96) / 1000)));
+  const detectorAttack = Math.exp(-1 / Math.max(1, sampleRate * ((options.detectorAttackMs ?? 0.35) / 1000)));
+  const detectorRelease = Math.exp(-1 / Math.max(1, sampleRate * ((options.detectorReleaseMs ?? 28) / 1000)));
+  const broadAttack = Math.exp(-1 / Math.max(1, sampleRate * ((options.broadAttackMs ?? 1.5) / 1000)));
+  const broadRelease = Math.exp(-1 / Math.max(1, sampleRate * ((options.broadReleaseMs ?? 90) / 1000)));
+  const minBroad = options.minBroad ?? 0.0035;
+  const allowedIncrease = options.allowedIncrease ?? 0.1;
+  const threshold = options.threshold ?? 0.035;
+  const ratioRange = Math.max(0.08, options.ratio ?? 0.38);
+  let activeSamples = 0;
+  let peakMix = 0;
+
+  for (let ch = 0; ch < channels; ch++) {
+    const processed = processedBuffer.getChannelData(ch);
+    const source = sourceBuffer.getChannelData(ch);
+    const procLowDet = processedLowDetector.getChannelData(ch);
+    const procMidDet = processedMidDetector.getChannelData(ch);
+    const procAirDet = processedAirDetector.getChannelData(ch);
+    const srcLowDet = sourceLowDetector.getChannelData(ch);
+    const srcMidDet = sourceMidDetector.getChannelData(ch);
+    const srcAirDet = sourceAirDetector.getChannelData(ch);
+    const cut = cutBuffer.getChannelData(ch);
+    const out = output.getChannelData(ch);
+    let procEnv = 0;
+    let srcEnv = 0;
+    let procBroad = 0;
+    let srcBroad = 0;
+    let env = 0;
+
+    for (let i = 0; i < length; i++) {
+      const procDetAbs = Math.abs(procLowDet[i]) * 0.54 +
+        Math.abs(procMidDet[i]) +
+        Math.abs(procAirDet[i]) * 0.62;
+      const srcDetAbs = Math.abs(srcLowDet[i]) * 0.54 +
+        Math.abs(srcMidDet[i]) +
+        Math.abs(srcAirDet[i]) * 0.62;
+      const procAbs = Math.abs(processed[i]);
+      const srcAbs = Math.abs(source[i]);
+
+      procEnv = procDetAbs > procEnv
+        ? detectorAttack * procEnv + (1 - detectorAttack) * procDetAbs
+        : detectorRelease * procEnv + (1 - detectorRelease) * procDetAbs;
+      srcEnv = srcDetAbs > srcEnv
+        ? detectorAttack * srcEnv + (1 - detectorAttack) * srcDetAbs
+        : detectorRelease * srcEnv + (1 - detectorRelease) * srcDetAbs;
+      procBroad = procAbs > procBroad
+        ? broadAttack * procBroad + (1 - broadAttack) * procAbs
+        : broadRelease * procBroad + (1 - broadRelease) * procAbs;
+      srcBroad = srcAbs > srcBroad
+        ? broadAttack * srcBroad + (1 - broadAttack) * srcAbs
+        : broadRelease * srcBroad + (1 - broadRelease) * srcAbs;
+
+      const procRatio = procEnv / Math.max(minBroad, procBroad);
+      const srcRatio = srcEnv / Math.max(minBroad, srcBroad);
+      const addedRatio = procRatio - srcRatio * (1 + allowedIncrease);
+      const absoluteGate = clamp((procEnv - srcEnv * 1.08 - minBroad * 0.25) / Math.max(minBroad, minBroad * 1.5), 0, 1);
+      const target = clamp((addedRatio - threshold) / ratioRange, 0, 1) * amount * absoluteGate;
+      env = target > env
+        ? attack * env + (1 - attack) * target
+        : release * env + (1 - release) * target;
+
+      if (env > 0.015) activeSamples++;
+      if (env > peakMix) peakMix = env;
+      out[i] = processed[i] * (1 - env) + cut[i] * env;
+    }
+  }
+
+  return {
+    buffer: output,
+    moves: {
+      amount,
+      activeRatio: activeSamples / Math.max(1, length * channels),
+      peakMix,
+      skipped: false
+    }
+  };
+}
+
+export function applySourceDifferentialToneGuard(processedBuffer, sourceBuffer, options = {}) {
+  const amount = clamp(options.amount ?? 0.75, 0, 1);
+  if (!processedBuffer || !sourceBuffer || amount <= 0) {
+    return { buffer: processedBuffer, moves: null };
+  }
+
+  const processed = analyzeAIGeneratedMastering(processedBuffer);
+  const source = analyzeAIGeneratedMastering(sourceBuffer);
+  const processedProfile = processed.profile || {};
+  const sourceProfile = source.profile || {};
+  const allowance = {
+    presence: options.presenceAllowanceDB ?? 0.25,
+    harsh: options.harshAllowanceDB ?? 0.25,
+    metallic: options.metallicAllowanceDB ?? 0.2,
+    air: options.airAllowanceDB ?? 0.35
+  };
+  const presenceExcess = Math.max(
+    0,
+    (processedProfile.presenceToBodyDB ?? 0) -
+      (sourceProfile.presenceToBodyDB ?? 0) -
+      allowance.presence
+  );
+  const harshExcess = Math.max(
+    0,
+    (processedProfile.harshDB ?? -18) -
+      (sourceProfile.harshDB ?? -18) -
+      allowance.harsh
+  );
+  const metallicExcess = Math.max(
+    0,
+    (processedProfile.metallicDB ?? -18) -
+      (sourceProfile.metallicDB ?? -18) -
+      allowance.metallic
+  );
+  const airExcess = Math.max(
+    0,
+    (processedProfile.airDB ?? -18) -
+      (sourceProfile.airDB ?? -18) -
+      allowance.air
+  );
+  const codecExcess = Math.max(0, (processed.codecStress ?? 0) - (source.codecStress ?? 0) - 0.035);
+  const fizzCut = -clamp(
+    (presenceExcess * 0.24 + harshExcess * 0.2 + codecExcess * 1.1) * amount,
+    0,
+    options.maxFizzCutDB ?? 2.2
+  );
+  const sibilanceCut = -clamp(
+    (harshExcess * 0.36 + metallicExcess * 0.16 + codecExcess * 1.25) * amount,
+    0,
+    options.maxSibilanceCutDB ?? 2.6
+  );
+  const metallicCut = -clamp(
+    (metallicExcess * 0.34 + airExcess * 0.08 + codecExcess * 1.05) * amount,
+    0,
+    options.maxMetallicCutDB ?? 2.4
+  );
+  const airShelf = -clamp(
+    (airExcess * 0.28 + metallicExcess * 0.08 + codecExcess * 0.9) * amount,
+    0,
+    options.maxAirCutDB ?? 1.8
+  );
+
+  if (
+    Math.abs(fizzCut) < 0.05 &&
+    Math.abs(sibilanceCut) < 0.05 &&
+    Math.abs(metallicCut) < 0.05 &&
+    Math.abs(airShelf) < 0.05
+  ) {
+    return {
+      buffer: processedBuffer,
+      processed,
+      source,
+      moves: {
+        skipped: true,
+        presenceExcess,
+        harshExcess,
+        metallicExcess,
+        airExcess,
+        codecExcess,
+        fizzCut: 0,
+        sibilanceCut: 0,
+        metallicCut: 0,
+        airShelf: 0
+      }
+    };
+  }
+
+  let output = processedBuffer;
+  output = applyFilterToBuffer(output, 'peaking', options.fizzFreq ?? 3900, fizzCut, 0.9);
+  output = applyFilterToBuffer(output, 'peaking', options.lowSibilanceFreq ?? 5600, sibilanceCut * 0.55, 1.05);
+  output = applyFilterToBuffer(output, 'peaking', options.sibilanceFreq ?? 7600, sibilanceCut, 1.5);
+  output = applyFilterToBuffer(output, 'peaking', options.metallicFreq ?? 10500, metallicCut, 2.1);
+  output = applyFilterToBuffer(output, 'highshelf', options.airFreq ?? 12000, airShelf, 0.62);
+
+  return {
+    buffer: output,
+    processed,
+    source,
+    postAnalysis: analyzeAIGeneratedMastering(output),
+    moves: {
+      skipped: false,
+      presenceExcess,
+      harshExcess,
+      metallicExcess,
+      airExcess,
+      codecExcess,
+      fizzCut,
+      sibilanceCut,
+      metallicCut,
+      airShelf
+    }
+  };
+}
+
+export function applySourceConstrainedSibilanceRepair(processedBuffer, sourceBuffer, options = {}) {
+  const amount = clamp(options.amount ?? 0.7, 0, 1);
+  if (!processedBuffer || !sourceBuffer || amount <= 0) {
+    return { buffer: processedBuffer, moves: null };
+  }
+  if (
+    processedBuffer.sampleRate !== sourceBuffer.sampleRate ||
+    processedBuffer.length !== sourceBuffer.length
+  ) {
+    return {
+      buffer: processedBuffer,
+      moves: { skipped: true, reason: 'source-mismatch' }
+    };
+  }
+
+  const sampleRate = processedBuffer.sampleRate;
+  const length = processedBuffer.length;
+  const channels = Math.min(processedBuffer.numberOfChannels, sourceBuffer.numberOfChannels);
+  let output = createBufferLike(processedBuffer);
+  const bands = options.bands || [
+    { freq: 4200, q: 0.9, weight: 0.78 },
+    { freq: 6200, q: 1.05, weight: 1.0 },
+    { freq: 8300, q: 1.15, weight: 1.0 },
+    { freq: 11200, q: 0.95, weight: 0.82 }
+  ];
+  const attack = Math.exp(-1 / Math.max(1, sampleRate * ((options.attackMs ?? 0.55) / 1000)));
+  const release = Math.exp(-1 / Math.max(1, sampleRate * ((options.releaseMs ?? 115) / 1000)));
+  const detectorAttack = Math.exp(-1 / Math.max(1, sampleRate * ((options.detectorAttackMs ?? 0.45) / 1000)));
+  const detectorRelease = Math.exp(-1 / Math.max(1, sampleRate * ((options.detectorReleaseMs ?? 34) / 1000)));
+  const broadAttack = Math.exp(-1 / Math.max(1, sampleRate * ((options.broadAttackMs ?? 2.4) / 1000)));
+  const broadRelease = Math.exp(-1 / Math.max(1, sampleRate * ((options.broadReleaseMs ?? 150) / 1000)));
+  const allowedIncrease = options.allowedIncrease ?? 0.035;
+  const threshold = options.threshold ?? 0.028;
+  const ratioRange = Math.max(0.08, options.ratio ?? 0.34);
+  const maxMix = clamp(options.maxMix ?? 0.68, 0, 0.92);
+  const minBroad = options.minBroad ?? 0.003;
+  let totalActiveSamples = 0;
+  let peakMix = 0;
+  const bandMoves = [];
+
+  for (const band of bands) {
+    const currentProcessedBand = applyFilterToBuffer(output, 'bandpass', band.freq, 0.1, band.q);
+    const sourceBand = applyFilterToBuffer(sourceBuffer, 'bandpass', band.freq, 0.1, band.q);
+    const next = createBufferLike(output);
+    let bandActiveSamples = 0;
+    let bandPeakMix = 0;
+
+    for (let ch = 0; ch < channels; ch++) {
+      const processed = output.getChannelData(ch);
+      const source = sourceBuffer.getChannelData(ch);
+      const procBand = currentProcessedBand.getChannelData(ch);
+      const srcBand = sourceBand.getChannelData(ch);
+      const out = next.getChannelData(ch);
+      let procEnv = 0;
+      let srcEnv = 0;
+      let procBroad = 0;
+      let srcBroad = 0;
+      let env = 0;
+
+      for (let i = 0; i < length; i++) {
+        const procBandAbs = Math.abs(procBand[i]);
+        const srcBandAbs = Math.abs(srcBand[i]);
+        const procAbs = Math.abs(processed[i]);
+        const srcAbs = Math.abs(source[i]);
+
+        procEnv = procBandAbs > procEnv
+          ? detectorAttack * procEnv + (1 - detectorAttack) * procBandAbs
+          : detectorRelease * procEnv + (1 - detectorRelease) * procBandAbs;
+        srcEnv = srcBandAbs > srcEnv
+          ? detectorAttack * srcEnv + (1 - detectorAttack) * srcBandAbs
+          : detectorRelease * srcEnv + (1 - detectorRelease) * srcBandAbs;
+        procBroad = procAbs > procBroad
+          ? broadAttack * procBroad + (1 - broadAttack) * procAbs
+          : broadRelease * procBroad + (1 - broadRelease) * procAbs;
+        srcBroad = srcAbs > srcBroad
+          ? broadAttack * srcBroad + (1 - broadAttack) * srcAbs
+          : broadRelease * srcBroad + (1 - broadRelease) * srcAbs;
+
+        const sourceScale = clamp(procBroad / Math.max(minBroad, srcBroad), 0.6, options.maxSourceScale ?? 1.65);
+        const procRatio = procEnv / Math.max(minBroad, procBroad);
+        const srcRatio = (srcEnv * sourceScale) / Math.max(minBroad, procBroad);
+        const addedRatio = procRatio - srcRatio * (1 + allowedIncrease);
+        const absoluteGate = clamp(
+          (procEnv - srcEnv * sourceScale * 1.04 - minBroad * 0.2) / Math.max(minBroad, minBroad * 1.4),
+          0,
+          1
+        );
+        const target = clamp((addedRatio - threshold) / ratioRange, 0, 1) *
+          amount *
+          (band.weight ?? 1) *
+          absoluteGate;
+        env = target > env
+          ? attack * env + (1 - attack) * target
+          : release * env + (1 - release) * target;
+        const mix = Math.min(maxMix, env);
+        if (mix > 0.015) {
+          bandActiveSamples++;
+          totalActiveSamples++;
+        }
+        if (mix > bandPeakMix) bandPeakMix = mix;
+        if (mix > peakMix) peakMix = mix;
+
+        const constrainedBand = srcBand[i] * sourceScale;
+        out[i] = processed[i] + (constrainedBand - procBand[i]) * mix;
+      }
+    }
+
+    output = next;
+    bandMoves.push({
+      freq: band.freq,
+      activeRatio: bandActiveSamples / Math.max(1, length * channels),
+      peakMix: bandPeakMix
+    });
+  }
+
+  return {
+    buffer: output,
+    moves: {
+      skipped: totalActiveSamples === 0,
+      amount,
+      allowedIncrease,
+      activeRatio: totalActiveSamples / Math.max(1, length * channels * bands.length),
+      peakMix,
+      bands: bandMoves
+    }
+  };
+}
+
+export function applySourceConstrainedVocalBuzzRepair(processedBuffer, sourceBuffer, options = {}) {
+  const amount = clamp(options.amount ?? 0.7, 0, 1);
+  if (!processedBuffer || !sourceBuffer || amount <= 0) {
+    return { buffer: processedBuffer, moves: null };
+  }
+  if (
+    processedBuffer.sampleRate !== sourceBuffer.sampleRate ||
+    processedBuffer.length !== sourceBuffer.length
+  ) {
+    return {
+      buffer: processedBuffer,
+      moves: { skipped: true, reason: 'source-mismatch' }
+    };
+  }
+
+  const sampleRate = processedBuffer.sampleRate;
+  const length = processedBuffer.length;
+  const channels = Math.min(processedBuffer.numberOfChannels, sourceBuffer.numberOfChannels);
+  let output = createBufferLike(processedBuffer);
+  const bands = options.bands || [
+    { freq: 1400, q: 0.68, weight: 0.12 },
+    { freq: 1900, q: 0.72, weight: 0.24 },
+    { freq: 2400, q: 0.78, weight: 0.4 },
+    { freq: 3000, q: 0.86, weight: 0.68 },
+    { freq: 3800, q: 0.94, weight: 0.82 },
+    { freq: 5000, q: 1.0, weight: 0.68 },
+    { freq: 6400, q: 1.06, weight: 0.48 },
+    { freq: 7800, q: 1.08, weight: 0.32 }
+  ];
+  const attack = Math.exp(-1 / Math.max(1, sampleRate * ((options.attackMs ?? 0.28) / 1000)));
+  const release = Math.exp(-1 / Math.max(1, sampleRate * ((options.releaseMs ?? 70) / 1000)));
+  const detectorAttack = Math.exp(-1 / Math.max(1, sampleRate * ((options.detectorAttackMs ?? 0.22) / 1000)));
+  const detectorRelease = Math.exp(-1 / Math.max(1, sampleRate * ((options.detectorReleaseMs ?? 20) / 1000)));
+  const broadAttack = Math.exp(-1 / Math.max(1, sampleRate * ((options.broadAttackMs ?? 1.4) / 1000)));
+  const broadRelease = Math.exp(-1 / Math.max(1, sampleRate * ((options.broadReleaseMs ?? 105) / 1000)));
+  const allowedIncrease = options.allowedIncrease ?? 0.018;
+  const threshold = options.threshold ?? 0.014;
+  const ratioRange = Math.max(0.06, options.ratio ?? 0.26);
+  const maxMix = clamp(options.maxMix ?? 0.62, 0, 0.86);
+  const minBroad = options.minBroad ?? 0.0028;
+  const minResidual = options.minResidual ?? 0.0022;
+  const curvatureAllowance = options.curvatureAllowance ?? 0.28;
+  const phaseSafe = options.phaseSafe ?? true;
+  const maxBandReduction = clamp(options.maxBandReduction ?? 0.72, 0.05, 0.95);
+  let totalActiveSamples = 0;
+  let peakMix = 0;
+  const bandMoves = [];
+
+  for (const band of bands) {
+    const currentProcessedBand = applyFilterToBuffer(output, 'bandpass', band.freq, 0.1, band.q);
+    const sourceBand = applyFilterToBuffer(sourceBuffer, 'bandpass', band.freq, 0.1, band.q);
+    const next = createBufferLike(output);
+    let bandActiveSamples = 0;
+    let bandPeakMix = 0;
+
+    for (let ch = 0; ch < channels; ch++) {
+      const processed = output.getChannelData(ch);
+      const source = sourceBuffer.getChannelData(ch);
+      const procBand = currentProcessedBand.getChannelData(ch);
+      const srcBand = sourceBand.getChannelData(ch);
+      const out = next.getChannelData(ch);
+      let procEnv = 0;
+      let srcEnv = 0;
+      let procBroad = 0;
+      let srcBroad = 0;
+      let env = 0;
+
+      for (let i = 2; i < length - 2; i++) {
+        const procBandAbs = Math.abs(procBand[i]);
+        const srcBandAbs = Math.abs(srcBand[i]);
+        const procAbs = Math.abs(processed[i]);
+        const srcAbs = Math.abs(source[i]);
+
+        procEnv = procBandAbs > procEnv
+          ? detectorAttack * procEnv + (1 - detectorAttack) * procBandAbs
+          : detectorRelease * procEnv + (1 - detectorRelease) * procBandAbs;
+        srcEnv = srcBandAbs > srcEnv
+          ? detectorAttack * srcEnv + (1 - detectorAttack) * srcBandAbs
+          : detectorRelease * srcEnv + (1 - detectorRelease) * srcBandAbs;
+        procBroad = procAbs > procBroad
+          ? broadAttack * procBroad + (1 - broadAttack) * procAbs
+          : broadRelease * procBroad + (1 - broadRelease) * procAbs;
+        srcBroad = srcAbs > srcBroad
+          ? broadAttack * srcBroad + (1 - broadAttack) * srcAbs
+          : broadRelease * srcBroad + (1 - broadRelease) * srcAbs;
+
+        const sourceScale = clamp(procBroad / Math.max(minBroad, srcBroad), 0.65, options.maxSourceScale ?? 1.55);
+        const sourceAligned = srcBand[i] * sourceScale;
+        const residual = procBand[i] - sourceAligned;
+        const procRatio = procEnv / Math.max(minBroad, procBroad);
+        const srcRatio = (srcEnv * sourceScale) / Math.max(minBroad, procBroad);
+        const addedRatio = procRatio - srcRatio * (1 + allowedIncrease);
+        const ratioTarget = clamp((addedRatio - threshold) / ratioRange, 0, 1);
+
+        const procCurvature = Math.abs(procBand[i - 1] - procBand[i] * 2 + procBand[i + 1]);
+        const srcCurvature = Math.abs(srcBand[i - 1] - srcBand[i] * 2 + srcBand[i + 1]) * sourceScale;
+        const roughExcess = procCurvature - srcCurvature * (1 + curvatureAllowance);
+        const roughGate = clamp(
+          roughExcess / Math.max(minResidual, procEnv * 0.32, minBroad * 0.5),
+          0,
+          1
+        );
+
+        const residualTarget = clamp(
+          (Math.abs(residual) - Math.max(minResidual, Math.abs(sourceAligned) * 0.72)) /
+            Math.max(minResidual, procEnv * 0.42, minBroad * 0.7),
+          0,
+          1
+        );
+        const broadGate = clamp((procBroad - minBroad * 0.8) / Math.max(minBroad, minBroad * 3), 0, 1);
+        const target = Math.max(ratioTarget * 0.74, residualTarget * roughGate) *
+          amount *
+          (band.weight ?? 1) *
+          broadGate;
+
+        env = target > env
+          ? attack * env + (1 - attack) * target
+          : release * env + (1 - release) * target;
+        const mix = Math.min(maxMix, env);
+
+        if (mix > 0.012) {
+          bandActiveSamples++;
+          totalActiveSamples++;
+        }
+        if (mix > bandPeakMix) bandPeakMix = mix;
+        if (mix > peakMix) peakMix = mix;
+
+        if (phaseSafe) {
+          const addedBand = Math.max(
+            0,
+            Math.abs(procBand[i]) - Math.abs(sourceAligned) * (1 + allowedIncrease)
+          );
+          const bandReduction = Math.min(
+            maxBandReduction,
+            mix * addedBand / Math.max(minResidual, Math.abs(procBand[i]))
+          );
+          out[i] = processed[i] - procBand[i] * bandReduction;
+        } else {
+          out[i] = processed[i] + (sourceAligned - procBand[i]) * mix;
+        }
+      }
+    }
+
+    output = next;
+    bandMoves.push({
+      freq: band.freq,
+      activeRatio: bandActiveSamples / Math.max(1, length * channels),
+      peakMix: bandPeakMix
+    });
+  }
+
+  return {
+    buffer: output,
+    moves: {
+      skipped: totalActiveSamples === 0,
+      amount,
+      allowedIncrease,
+      phaseSafe,
+      activeRatio: totalActiveSamples / Math.max(1, length * channels * bands.length),
+      peakMix,
+      bands: bandMoves
+    }
+  };
+}
+
 export function getAIMasteringRecommendation(analysis, source = {}) {
   const profile = chooseAIMasteringProfile(analysis, 'auto');
   const { harshDB, metallicDB = -18, airDB, mudDB, subToBassDB, presenceToBodyDB = 0 } = analysis.profile;
@@ -1264,7 +2062,11 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
     !clippedOrPinned &&
     limiterRisk < 0.45 &&
     (peaks.loudestCrestDB ?? analysis.crestDB) > 8.5;
-  const tapeWarmth = !percussiveArtifactRisk && limiterRisk < 0.45;
+  const tapeWarmth = (profile.name === 'tape' || profile.name === 'warm') &&
+    !percussiveArtifactRisk &&
+    limiterRisk < 0.35 &&
+    harshDB < -12.5 &&
+    metallicDB < -15;
   const autoLevel = (peaks.dynamicSpreadDB ?? 0) > 7.5 && !clippedOrPinned;
 
   return {
