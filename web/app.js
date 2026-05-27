@@ -34,6 +34,7 @@ import {
   setupOutputPresets,
   updateOutputPresetButtons,
   setTargetLufs,
+  setCurrentSourceFormat,
   setReferenceAnalysis,
   // Meters
   meterState,
@@ -132,9 +133,27 @@ const fileState = {
   estimatedBitrateKbps: null,
   aiAnalysis: null,          // Cached source analysis for responsive live preview
   aiAutoRecommendation: null,
+  aiPresetRecommendationCache: {},
+  sourceFormat: 'wav',
+  isLossySource: false,
   waveformMode: 'original',  // 'original' | 'processed'
   forceLivePreview: false    // True while waiting for full rendered preview to catch up
 };
+
+function getAudioFileFormat(fileOrName) {
+  const name = typeof fileOrName === 'string'
+    ? fileOrName
+    : fileOrName?.name || '';
+  const type = typeof fileOrName === 'string'
+    ? ''
+    : fileOrName?.type || '';
+  if (/\.mp3$/i.test(name) || /^audio\/(?:mpeg|mp3)$/i.test(type)) return 'mp3';
+  return 'wav';
+}
+
+function isLossyAudioFormat(format) {
+  return String(format || '').toLowerCase() === 'mp3';
+}
 
 // Level meter state imported from ./ui/meters.js
 
@@ -228,6 +247,12 @@ const aiEnhance = document.getElementById('aiEnhance');
 const aiProfile = document.getElementById('aiProfile');
 const aiIntensity = document.getElementById('aiIntensity');
 const aiIntensityValue = document.getElementById('aiIntensityValue');
+const masterBass = document.getElementById('masterBass');
+const masterBassValue = document.getElementById('masterBassValue');
+const masterMid = document.getElementById('masterMid');
+const masterMidValue = document.getElementById('masterMidValue');
+const masterHigh = document.getElementById('masterHigh');
+const masterHighValue = document.getElementById('masterHighValue');
 const sibilanceProtection = document.getElementById('sibilanceProtection');
 const sibilanceProtectionValue = document.getElementById('sibilanceProtectionValue');
 const artifactProtection = document.getElementById('artifactProtection');
@@ -283,6 +308,8 @@ if (spectroBtn && spectrogramContainer) {
     spectroBtn.classList.toggle('active');
 
     if (!spectrogramContainer.classList.contains('hidden')) {
+      spectrogram.setTimelineBuffer(getTimelineBuffer(), playerState.isBypassed ? 'SOURCE ON' : 'MASTER ON');
+      spectrogram.setPlaybackTime(playerState.pauseTime);
       spectrogram.start();
     } else {
       spectrogram.stop();
@@ -309,6 +336,21 @@ function resetOutputToStreamingDefault() {
   clearExportQualitySummary();
 }
 
+function updateBypassButtonState() {
+  if (!bypassBtn) return;
+  const isSource = Boolean(playerState.isBypassed);
+  const bypassLabel = bypassBtn.querySelector('.bypass-label');
+  if (bypassLabel) {
+    bypassLabel.textContent = isSource ? 'SOURCE ON' : 'MASTER ON';
+  }
+  bypassBtn.classList.toggle('active', isSource);
+  bypassBtn.classList.toggle('fx-on', !isSource);
+  bypassBtn.title = isSource
+    ? 'SOURCE ON: exact original source is playing. Click for MASTER ON.'
+    : 'MASTER ON: mastered preview is playing. Click for SOURCE ON.';
+  bypassBtn.setAttribute('aria-pressed', String(!isSource));
+}
+
 function resetTransportPreviewState() {
   playerState.isBypassed = false;
   playerState.isSeeking = false;
@@ -322,14 +364,13 @@ function resetTransportPreviewState() {
     clearTimeout(playerState.seekTimeout);
     playerState.seekTimeout = null;
   }
-  bypassBtn?.classList.remove('active');
-  const bypassLabel = bypassBtn?.querySelector('.bypass-label');
-  if (bypassLabel) bypassLabel.textContent = 'FX';
+  updateBypassButtonState();
   syncLevelMatchControls(true);
 }
 
 function resetSpectrogramView() {
   spectrogram.stop();
+  spectrogram.setTimelineBuffer(null);
   spectrogramContainer?.classList.add('hidden');
   spectroBtn?.classList.remove('active');
 }
@@ -725,8 +766,11 @@ function applyPreviewApproximation() {
       reset();
       return;
     }
-    const analysis = fileState.aiAnalysis || analyzeAIGeneratedMastering(fileState.originalBuffer);
-    fileState.aiAnalysis = analysis;
+    const analysis = fileState.aiAnalysis;
+    if (!analysis) {
+      reset();
+      return;
+    }
     const profile = chooseAIMasteringProfile(analysis, settings.aiProfile || 'auto');
     const moves = getAIGeneratedMasteringMoves(
       analysis,
@@ -819,7 +863,7 @@ function connectAudioChain(source) {
 
 /**
  * Connect source directly to output (bypassing effects chain)
- * Used for FX bypass (original / level-matched preview)
+ * Used for SOURCE ON comparison with the exact original buffer.
  */
 function connectDirectToOutput(source) {
   // Static graph is wired in createAudioChain().
@@ -837,10 +881,7 @@ function isCurrentArtifactSafeSource() {
 }
 
 function getBypassPlaybackBuffer() {
-  const levelMatch = document.getElementById('levelMatchBtn')?.checked;
-  return levelMatch
-    ? fileState.normalizedBuffer || fileState.originalBuffer
-    : fileState.originalBuffer;
+  return fileState.originalBuffer;
 }
 
 function getActivePlaybackBuffer() {
@@ -876,6 +917,7 @@ function syncTimelineDuration(buffer = getTimelineBuffer()) {
   playerState.pauseTime = clampPlaybackTime(playerState.pauseTime, buffer);
   seekBar.value = playerState.pauseTime;
   updateWaveSurferProgress(playerState.pauseTime, buffer.duration);
+  spectrogram.setPlaybackTime(playerState.pauseTime);
 }
 
 function switchToLivePreview() {
@@ -914,11 +956,23 @@ function updateEQ() {
     audioNodes.eqHighMid.gain.value = 0;
     audioNodes.eqHigh.gain.value = 0;
   } else {
-    audioNodes.eqLow.gain.value = eqValues.low;
+    const bassTone = Math.max(-2.5, Math.min(2.5, parseFloat(masterBass?.value) || 0));
+    const midTone = Math.max(-2.5, Math.min(2.5, parseFloat(masterMid?.value) || 0));
+    let highTone = Math.max(-2.5, Math.min(2.5, parseFloat(masterHigh?.value) || 0));
+    if (!fileState.isLossySource && highTone > 0) {
+      const profile = fileState.aiAnalysis?.profile || {};
+      const peaks = fileState.aiAnalysis?.peaks || {};
+      const highRisk =
+        (profile.harshDB ?? -18) > -12.5 ||
+        (profile.metallicDB ?? -18) > -15 ||
+        (peaks.spikeDensity ?? 0) > 0.006;
+      highTone = Math.min(highTone, highRisk ? 0 : 0.8);
+    }
+    audioNodes.eqLow.gain.value = eqValues.low + bassTone;
     audioNodes.eqLowMid.gain.value = eqValues.lowMid;
-    audioNodes.eqMid.gain.value = eqValues.mid;
+    audioNodes.eqMid.gain.value = eqValues.mid + midTone;
     audioNodes.eqHighMid.gain.value = eqValues.highMid;
-    audioNodes.eqHigh.gain.value = eqValues.high;
+    audioNodes.eqHigh.gain.value = eqValues.high + highTone;
   }
 }
 
@@ -929,14 +983,21 @@ function updateInputGain() {
 }
 
 function showProcessedWaveform(buffer) {
-  if (!buffer || fileState.waveformMode === 'processed') return;
-  updateWaveformBuffer(buffer);
+  if (!buffer) return;
+  if (fileState.waveformMode !== 'processed') {
+    updateWaveformBuffer(buffer);
+  }
+  spectrogram.setTimelineBuffer(buffer, 'MASTER ON');
+  spectrogram.setPlaybackTime(playerState.pauseTime);
   fileState.waveformMode = 'processed';
 }
 
 function showSourceWaveform() {
-  if (fileState.waveformMode === 'original') return;
-  showOriginalWaveform();
+  if (fileState.waveformMode !== 'original') {
+    showOriginalWaveform();
+  }
+  spectrogram.setTimelineBuffer(fileState.originalBuffer, 'SOURCE ON');
+  spectrogram.setPlaybackTime(playerState.pauseTime);
   fileState.waveformMode = 'original';
 }
 
@@ -997,6 +1058,7 @@ let cacheRenderQueuedImmediate = false;
 let liveWaveformTimeout = null;
 const CACHE_RENDER_DEBOUNCE_MS = 500;
 const LIVE_PREVIEW_RENDER_DEBOUNCE_MS = 300;
+const COMMIT_RENDER_DEBOUNCE_MS = 1200;
 
 // getCurrentSettings imported from ./ui/controls.js
 
@@ -1021,9 +1083,10 @@ function scheduleRenderToCache(options = {}) {
   fileState.cacheRenderVersion++;
   const thisVersion = fileState.cacheRenderVersion;
 
-  // Show "rendering..." indicator
+  // Show a pending state first. The heavy render starts only after the user
+  // stops changing controls long enough for the debounce to settle.
   if (outputLufsDisplay) {
-    outputLufsDisplay.textContent = '... LUFS';
+    outputLufsDisplay.textContent = delayMs > 0 ? 'Pending master' : 'Mastering...';
   }
   updateChecklist();
 
@@ -1042,6 +1105,9 @@ function scheduleRenderToCache(options = {}) {
     cacheRenderQueuedImmediate = false;
     fileState.isRenderingCache = true;
     console.log('[Cache] Starting render, version:', thisVersion);
+    if (outputLufsDisplay) {
+      outputLufsDisplay.textContent = 'Mastering...';
+    }
 
     try {
       const settings = getCurrentSettings();
@@ -1066,7 +1132,7 @@ function scheduleRenderToCache(options = {}) {
               // Show progress in LUFS display
               const percent = Math.round(progress * 100);
               if (outputLufsDisplay && progress < 1) {
-                outputLufsDisplay.textContent = `${percent}%`;
+                outputLufsDisplay.textContent = `Master ${percent}%`;
               }
             }
           );
@@ -1120,13 +1186,12 @@ function scheduleRenderToCache(options = {}) {
         console.log('[Cache] Render complete, version:', thisVersion, 'LUFS:', lufs.toFixed(1));
         updateChecklist();
 
-        // If we're actively previewing FX, hot-swap to the new master-preview buffer.
-        // This keeps meters/audio in sync with the full chain (including final limiter)
-        // after any setting change.
+        // Do not restart playback to hot-swap the rendered buffer. While the
+        // user is changing controls, the live Web Audio chain stays responsive;
+        // the completed cache is used for meters, the next play, seek, and export.
         if (playerState.isPlaying && !playerState.isBypassed && audioNodes.context) {
           const currentTime = audioNodes.context.currentTime - playerState.startTime;
           playerState.pauseTime = clampPlaybackTime(currentTime, buffer);
-          playAudio();
         }
       } else {
         console.log('[Cache] Render discarded (outdated version:', thisVersion, 'current:', fileState.cacheRenderVersion, ')');
@@ -1169,10 +1234,12 @@ function schedulePreviewUpdate(options = {}) {
     });
   }
 
-  scheduleRenderToCache({
-    immediate: playerState.isPlaying && !playerState.isBypassed,
-    ...options
-  });
+  if (options.renderCache !== false) {
+    scheduleRenderToCache({
+      immediate: false,
+      delayMs: options.delayMs ?? COMMIT_RENDER_DEBOUNCE_MS
+    });
+  }
 }
 
 function getPlaybackPosition() {
@@ -1295,11 +1362,18 @@ async function loadAudioFile(file) {
   showLoadingModal('Loading audio...', 5);
 
   try {
+    const sourceFormat = getAudioFileFormat(file);
+    setCurrentSourceFormat(sourceFormat);
+    fileState.sourceFormat = sourceFormat;
+    fileState.isLossySource = isLossyAudioFormat(sourceFormat);
+
     // Read file data from browser File object
     const arrayBuffer = await file.arrayBuffer();
 
     // Create blob from original file data immediately (for WaveSurfer)
-    const originalBlob = new Blob([arrayBuffer], { type: file.type || 'audio/wav' });
+    const originalBlob = new Blob([arrayBuffer], {
+      type: file.type || (sourceFormat === 'mp3' ? 'audio/mpeg' : 'audio/wav')
+    });
 
     showLoadingModal('Decoding audio...', 20);
 
@@ -1362,6 +1436,7 @@ async function loadAudioFile(file) {
     fileState.aiAnalysis = null;
     fileState.estimatedBitrateKbps = null;
     fileState.aiAutoRecommendation = null;
+    fileState.aiPresetRecommendationCache = {};
     fileState.waveformMode = 'original';
     fileState.cacheRenderVersion++;
     clearExportQualitySummary();
@@ -1388,7 +1463,7 @@ async function loadAudioFile(file) {
     clearReferenceState();
     applyAIAutoRecommendation(fileState.aiAnalysis, {
       bitrateKbps: fileState.estimatedBitrateKbps,
-      isLossy: false
+      isLossy: fileState.isLossySource
     }, { force: true });
 
     const requestedTarget = Number.parseFloat(targetLufsSlider.value);
@@ -1428,6 +1503,7 @@ async function loadAudioFile(file) {
       },
       getBuffer: () => getTimelineBuffer()
     });
+    spectrogram.setTimelineBuffer(fileState.originalBuffer, 'SOURCE ON');
 
     // Keep play button disabled until cache render completes
     // processBtn can be enabled now
@@ -1456,19 +1532,14 @@ function playAudio() {
   if (!audioNodes.context) return;
 
   // Choose playback buffer based on bypass state:
-  // - Bypassed (FX OFF): Use original/normalized buffer (unprocessed)
+  // - SOURCE ON: Use the exact original buffer.
   // - Not bypassed (FX ON): Use cached processed buffer if available
   let playbackBuffer;
   let useDirectOutput = false;
 
   if (playerState.isBypassed) {
-    // Bypass: check Level Match setting
     playbackBuffer = getBypassPlaybackBuffer();
-    if (document.getElementById('levelMatchBtn')?.checked) {
-      console.log('[Playback] Bypass ON (Level Matched) - using normalizedBuffer');
-    } else {
-      console.log('[Playback] Bypass ON (True Bypass) - using originalBuffer');
-    }
+    console.log('[Playback] SOURCE ON - using exact originalBuffer');
 
     useDirectOutput = true; // Skip effects chain entirely
   } else {
@@ -1500,6 +1571,8 @@ function playAudio() {
   }
 
   if (!playbackBuffer) return;
+  spectrogram.setTimelineBuffer(playbackBuffer, playerState.isBypassed ? 'SOURCE ON' : 'MASTER ON');
+  spectrogram.setPlaybackTime(playerState.pauseTime);
 
   try {
     if (audioNodes.context.state === 'suspended') {
@@ -1549,6 +1622,7 @@ function playAudio() {
           seekBar.value = currentTime;
           currentTimeEl.textContent = formatTime(currentTime);
           updateWaveSurferProgress(currentTime, playbackBuffer.duration);
+          spectrogram.setPlaybackTime(currentTime);
         }
       }
     }, 100);
@@ -1648,6 +1722,8 @@ function seekTo(time) {
       playerState.isSeeking = false;
       return;
     }
+    spectrogram.setTimelineBuffer(playbackBuffer, playerState.isBypassed ? 'SOURCE ON' : 'MASTER ON');
+    spectrogram.setPlaybackTime(safeTime);
 
     const restartTime = clampPlaybackTime(safeTime, playbackBuffer);
     playerState.pauseTime = restartTime;
@@ -1685,11 +1761,13 @@ function seekTo(time) {
           seekBar.value = currentTime;
           currentTimeEl.textContent = formatTime(currentTime);
           updateWaveSurferProgress(currentTime, playbackBuffer.duration);
+          spectrogram.setPlaybackTime(currentTime);
         }
       }
     }, 100);
   } else {
     updateWaveSurferProgress(safeTime, (playbackBuffer || getTimelineBuffer())?.duration);
+    spectrogram.setPlaybackTime(safeTime);
   }
 
   // Release seek lock after a brief delay to allow audio to stabilize
@@ -1731,7 +1809,7 @@ referenceInput.addEventListener('change', async (e) => {
 clearReferenceBtn.addEventListener('click', () => {
   clearReferenceState();
   markCustomPreset();
-  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
   updateChecklist();
 });
 
@@ -1770,6 +1848,7 @@ async function clearCurrentSession({ toast = true } = {}) {
   resetSpectrogramView();
 
   currentFile = null;
+  setCurrentSourceFormat('wav');
   window.__currentAudioFileName = '';
   fileInput.value = '';
   fileState.selectedFilePath = null;
@@ -1783,10 +1862,13 @@ async function clearCurrentSession({ toast = true } = {}) {
   fileState.cachedRenderBuffer = null;
   fileState.cachedRenderLufs = null;
   fileState.isRenderingCache = false;
-  fileState.estimatedBitrateKbps = null;
-  fileState.aiAnalysis = null;
-  fileState.aiAutoRecommendation = null;
-  fileState.waveformMode = 'original';
+    fileState.estimatedBitrateKbps = null;
+    fileState.sourceFormat = 'wav';
+    fileState.isLossySource = false;
+    fileState.aiAnalysis = null;
+    fileState.aiAutoRecommendation = null;
+    fileState.aiPresetRecommendationCache = {};
+    fileState.waveformMode = 'original';
   fileState.forceLivePreview = false;
   fileState.originalLufs = null;
   fileState.originalTruePeak = null;
@@ -1838,6 +1920,10 @@ async function loadFile(file) {
   // Prevent loading while export is in progress
   if (isProcessing) {
     showToast('Cannot load file while processing', 'error');
+    return false;
+  }
+  if (!isSupportedAudioFile(file)) {
+    showToast('Please select a WAV or MP3 file.', 'error');
     return false;
   }
 
@@ -1904,13 +1990,13 @@ async function loadFile(file) {
 
 function isSupportedAudioFile(file) {
   if (!file) return false;
-  if (/\.wav$/i.test(file.name || '')) return true;
-  return /^(audio\/wav|audio\/x-wav|audio\/wave)$/i.test(file.type || '');
+  if (/\.(wav|mp3)$/i.test(file.name || '')) return true;
+  return /^(audio\/wav|audio\/x-wav|audio\/wave|audio\/mpeg|audio\/mp3)$/i.test(file.type || '');
 }
 
 async function loadDroppedFile(file) {
   if (!isSupportedAudioFile(file)) {
-    showToast('Please drop a WAV file.', 'error');
+    showToast('Please drop a WAV or MP3 file.', 'error');
     return false;
   }
 
@@ -2047,13 +2133,9 @@ seekBar.addEventListener('input', () => {
 
 bypassBtn.addEventListener('click', () => {
   playerState.isBypassed = !playerState.isBypassed;
-  const bypassLabel = bypassBtn.querySelector('.bypass-label');
-  if (bypassLabel) {
-    bypassLabel.textContent = playerState.isBypassed ? 'OFF' : 'FX';
-  }
-  bypassBtn.classList.toggle('active', playerState.isBypassed);
+  updateBypassButtonState();
 
-  console.log('[Bypass] Toggled to:', playerState.isBypassed ? 'OFF (original)' : 'FX ON (processed)');
+  console.log('[Bypass] Toggled to:', playerState.isBypassed ? 'SOURCE ON (original)' : 'MASTER ON (processed)');
   console.log('[Bypass] cachedRenderBuffer exists:', !!fileState.cachedRenderBuffer);
   console.log('[Bypass] isPlaying:', playerState.isPlaying);
 
@@ -2400,7 +2482,11 @@ function summarizeExportSettings(settings) {
     stereoWidth: settings.stereoWidth,
     referenceMatch: settings.referenceMatch,
     referenceAmount: settings.referenceAmount,
+    sourceFormat: settings.sourceFormat,
     isLossySource: settings.isLossySource,
+    masterBass: settings.masterBass,
+    masterMid: settings.masterMid,
+    masterHigh: settings.masterHigh,
     sampleRate: settings.sampleRate,
     bitDepth: settings.bitDepth,
     ditherMode: settings.ditherMode,
@@ -2695,7 +2781,10 @@ function isEqFlat() {
     Math.abs(eqValues.lowMid),
     Math.abs(eqValues.mid),
     Math.abs(eqValues.highMid),
-    Math.abs(eqValues.high)
+    Math.abs(eqValues.high),
+    Math.abs(parseFloat(masterBass?.value) || 0),
+    Math.abs(parseFloat(masterMid?.value) || 0),
+    Math.abs(parseFloat(masterHigh?.value) || 0)
   ) < 0.05;
 }
 
@@ -2713,6 +2802,7 @@ function resetEQToFlat() {
   document.querySelectorAll('.preset-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.preset === 'flat');
   });
+  updateSliderLabels();
   updateEQ();
 }
 
@@ -2740,7 +2830,7 @@ function updateControlPanelSummary() {
   if (modeEqValue) modeEqValue.textContent = isEqFlat() ? 'EQ Flat' : 'EQ Custom';
   if (levelMatchPanel) {
     const transportLevelMatch = document.getElementById('levelMatchBtn');
-    levelMatchPanel.checked = transportLevelMatch?.checked ?? true;
+    levelMatchPanel.checked = true;
   }
 }
 
@@ -2764,6 +2854,9 @@ function markCustomPreset() {
 
 function updateSliderLabels() {
   aiIntensityValue.textContent = `${aiIntensity.value}%`;
+  if (masterBassValue) masterBassValue.textContent = `${Number(masterBass?.value || 0).toFixed(1)} dB`;
+  if (masterMidValue) masterMidValue.textContent = `${Number(masterMid?.value || 0).toFixed(1)} dB`;
+  if (masterHighValue) masterHighValue.textContent = `${Number(masterHigh?.value || 0).toFixed(1)} dB`;
   sibilanceProtectionValue.textContent = `${sibilanceProtection.value}%`;
   artifactProtectionValue.textContent = `${artifactProtection.value}%`;
   referenceAmountValue.textContent = `${referenceAmount.value}%`;
@@ -2795,6 +2888,9 @@ const AI_MODE_DEFAULTS = {
     tapeWarmth: false,
     addAir: false,
     cutMud: false,
+    masterBass: 0,
+    masterMid: 0,
+    masterHigh: 0,
     stereoWidth: 100,
     referenceAmount: 65,
     cleanLowEnd: true,
@@ -2816,6 +2912,9 @@ const AI_MODE_DEFAULTS = {
     tapeWarmth: false,
     addAir: false,
     cutMud: true,
+    masterBass: -0.5,
+    masterMid: -0.5,
+    masterHigh: -0.5,
     stereoWidth: 98,
     referenceAmount: 60,
     cleanLowEnd: true,
@@ -2838,6 +2937,9 @@ const AI_MODE_DEFAULTS = {
     tapeWarmth: false,
     addAir: false,
     cutMud: true,
+    masterBass: -0.5,
+    masterMid: -0.5,
+    masterHigh: -1,
     stereoWidth: 98,
     referenceAmount: 55,
     cleanLowEnd: true,
@@ -2859,6 +2961,9 @@ const AI_MODE_DEFAULTS = {
     tapeWarmth: false,
     addAir: false,
     cutMud: true,
+    masterBass: 0.5,
+    masterMid: 0,
+    masterHigh: 0,
     stereoWidth: 100,
     referenceAmount: 60,
     cleanLowEnd: true,
@@ -2880,6 +2985,9 @@ const AI_MODE_DEFAULTS = {
     tapeWarmth: false,
     addAir: false,
     cutMud: false,
+    masterBass: 0,
+    masterMid: 0,
+    masterHigh: 0,
     stereoWidth: 100,
     referenceAmount: 65,
     cleanLowEnd: true,
@@ -2892,7 +3000,7 @@ const AI_MODE_DEFAULTS = {
     aiProfile: 'auto',
     aiIntensity: 100,
     sibilanceProtection: 50,
-    artifactProtection: 50,
+    artifactProtection: 70,
     inputGain: -3.5,
     truePeakCeiling: -1,
     targetLufs: -14,
@@ -2901,6 +3009,9 @@ const AI_MODE_DEFAULTS = {
     tapeWarmth: false,
     addAir: false,
     cutMud: false,
+    masterBass: 0,
+    masterMid: 0,
+    masterHigh: 0,
     stereoWidth: 100,
     referenceAmount: 65,
     cleanLowEnd: true,
@@ -2909,24 +3020,24 @@ const AI_MODE_DEFAULTS = {
     centerBass: true,
     autoLevel: false
   },
-  universal: { aiProfile: 'universal', aiIntensity: 105, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: false, addAir: false, cutMud: false, stereoWidth: 100 },
-  fire: { aiProfile: 'fire', aiIntensity: 110, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11, limiterCharacter: 'punch', addPunch: true, tapeWarmth: false, addAir: false, cutMud: true, stereoWidth: 100 },
-  clarity: { aiProfile: 'clarity', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: false, addAir: false, cutMud: true, stereoWidth: 100 },
-  tape: { aiProfile: 'tape', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 100 },
-  natural: { aiProfile: 'natural', aiIntensity: 95, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: false, addAir: false, cutMud: false, stereoWidth: 100 },
-  spatial: { aiProfile: 'spatial', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: false, addAir: false, cutMud: false, stereoWidth: 105 },
-  cinematic: { aiProfile: 'cinematic', aiIntensity: 100, sibilanceProtection: 65, artifactProtection: 70, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: false, addAir: false, cutMud: false, stereoWidth: 102 },
-  punchy: { aiProfile: 'punchy', aiIntensity: 105, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11.5, limiterCharacter: 'punch', addPunch: true, tapeWarmth: false, addAir: false, cutMud: true, stereoWidth: 100 },
-  warm: { aiProfile: 'warm', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, stereoWidth: 100 },
-  vocal: { aiProfile: 'vocal', aiIntensity: 100, sibilanceProtection: 80, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: false, addAir: false, cutMud: true, stereoWidth: 98 },
-  bass: { aiProfile: 'bass', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: false, addAir: false, cutMud: true, stereoWidth: 98 }
+  universal: { aiProfile: 'universal', aiIntensity: 105, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: false, addAir: false, cutMud: false, masterBass: 0, masterMid: 0, masterHigh: 0, stereoWidth: 100 },
+  fire: { aiProfile: 'fire', aiIntensity: 110, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11, limiterCharacter: 'punch', addPunch: true, tapeWarmth: false, addAir: false, cutMud: true, masterBass: 0.5, masterMid: 0, masterHigh: 0, stereoWidth: 100 },
+  clarity: { aiProfile: 'clarity', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: false, addAir: false, cutMud: true, masterBass: -0.5, masterMid: 0, masterHigh: 0.5, stereoWidth: 100 },
+  tape: { aiProfile: 'tape', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, masterBass: 0.5, masterMid: -0.5, masterHigh: -0.5, stereoWidth: 100 },
+  natural: { aiProfile: 'natural', aiIntensity: 95, sibilanceProtection: 65, artifactProtection: 70, inputGain: -3.5, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: false, addAir: false, cutMud: false, masterBass: 0, masterMid: 0, masterHigh: 0, stereoWidth: 100 },
+  spatial: { aiProfile: 'spatial', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'balanced', addPunch: false, tapeWarmth: false, addAir: false, cutMud: false, masterBass: -0.5, masterMid: 0, masterHigh: 0.5, stereoWidth: 105 },
+  cinematic: { aiProfile: 'cinematic', aiIntensity: 100, sibilanceProtection: 65, artifactProtection: 70, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: false, addAir: false, cutMud: false, masterBass: 0.5, masterMid: -0.5, masterHigh: 0, stereoWidth: 102 },
+  punchy: { aiProfile: 'punchy', aiIntensity: 105, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -11.5, limiterCharacter: 'punch', addPunch: true, tapeWarmth: false, addAir: false, cutMud: true, masterBass: 0.5, masterMid: 0.5, masterHigh: 0, stereoWidth: 100 },
+  warm: { aiProfile: 'warm', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -13, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: true, addAir: false, cutMud: false, masterBass: 0.5, masterMid: -0.5, masterHigh: -0.5, stereoWidth: 100 },
+  vocal: { aiProfile: 'vocal', aiIntensity: 100, sibilanceProtection: 80, artifactProtection: 75, inputGain: -4, truePeakCeiling: -1.5, targetLufs: -12.5, limiterCharacter: 'transparent', addPunch: false, tapeWarmth: false, addAir: false, cutMud: true, masterBass: -0.5, masterMid: 0.5, masterHigh: 0, stereoWidth: 98 },
+  bass: { aiProfile: 'bass', aiIntensity: 100, sibilanceProtection: 70, artifactProtection: 75, inputGain: -4.5, truePeakCeiling: -1.5, targetLufs: -12, limiterCharacter: 'balanced', addPunch: true, tapeWarmth: false, addAir: false, cutMud: true, masterBass: 1, masterMid: -0.5, masterHigh: -0.5, stereoWidth: 98 }
 };
 
 function refineModeDefaultsForCurrentSource(defaults) {
   const refined = { ...defaults };
   const analysis = fileState.aiAnalysis;
-  const isLossy = false;
-  const isLowBitrate = false;
+  const isLossy = Boolean(fileState.isLossySource);
+  const isLowBitrate = isLossy && Number.isFinite(fileState.estimatedBitrateKbps) && fileState.estimatedBitrateKbps < 192;
 
   if (!analysis) return refined;
 
@@ -2984,6 +3095,7 @@ function refineModeDefaultsForCurrentSource(defaults) {
     refined.addAir = false;
     refined.addPunch = false;
     refined.tapeWarmth = false;
+    refined.masterHigh = Math.min(refined.masterHigh ?? 0, -0.5);
     refined.glueCompression = false;
   }
 
@@ -2997,6 +3109,7 @@ function refineModeDefaultsForCurrentSource(defaults) {
     refined.addAir = false;
     refined.addPunch = false;
     refined.tapeWarmth = false;
+    refined.masterHigh = Math.min(refined.masterHigh ?? 0, -0.5);
     refined.glueCompression = false;
   }
 
@@ -3010,6 +3123,7 @@ function refineModeDefaultsForCurrentSource(defaults) {
     refined.addAir = false;
     refined.addPunch = false;
     refined.tapeWarmth = false;
+    refined.masterHigh = Math.min(refined.masterHigh ?? 0, -1);
     refined.glueCompression = false;
   }
 
@@ -3058,11 +3172,43 @@ function applyReferenceTargetDefaults(defaults) {
   return refined;
 }
 
-function applyModeDefaults(defaults, options = {}) {
-  const baseDefaults = options.referenceTarget
-    ? applyReferenceTargetDefaults({ ...AI_MODE_DEFAULTS.auto, ...defaults })
+function getCachedPresetRecommendation(name, factory) {
+  if (!fileState.aiAnalysis || typeof factory !== 'function') return null;
+  const key = `${name}:${fileState.sourceFormat || 'wav'}:${fileState.estimatedBitrateKbps || 0}`;
+  if (!fileState.aiPresetRecommendationCache) {
+    fileState.aiPresetRecommendationCache = {};
+  }
+  if (!fileState.aiPresetRecommendationCache[key]) {
+    fileState.aiPresetRecommendationCache[key] = factory();
+  }
+  return fileState.aiPresetRecommendationCache[key];
+}
+
+function getLatestAnalysisRecommendation() {
+  if (!fileState.aiAnalysis) return null;
+  const recommendation = fileState.aiAutoRecommendation ||
+    getCachedPresetRecommendation('ai-auto', () => (
+      getAIMasteringRecommendation(fileState.aiAnalysis, getCurrentSourceDescriptor())
+    ));
+  fileState.aiAutoRecommendation = recommendation;
+  return recommendation;
+}
+
+function buildAnalysisAwareModeDefaults(defaults, options = {}) {
+  const analysisRecommendation = options.analysisAware === false
+    ? null
+    : getLatestAnalysisRecommendation();
+  const sourceAwareBase = analysisRecommendation
+    ? { ...AI_MODE_DEFAULTS.auto, ...analysisRecommendation, ...defaults }
     : { ...AI_MODE_DEFAULTS.auto, ...defaults };
-  const merged = refineModeDefaultsForCurrentSource(baseDefaults);
+  const referenceAwareBase = options.referenceTarget
+    ? applyReferenceTargetDefaults(sourceAwareBase)
+    : sourceAwareBase;
+  return refineModeDefaultsForCurrentSource(referenceAwareBase);
+}
+
+function applyModeDefaults(defaults, options = {}) {
+  const merged = buildAnalysisAwareModeDefaults(defaults, options);
   aiEnhance.checked = options.aiEnhance ?? true;
   normalizeLoudness.checked = true;
   truePeakLimit.checked = true;
@@ -3073,6 +3219,9 @@ function applyModeDefaults(defaults, options = {}) {
   autoLevel.checked = merged.autoLevel;
   aiProfile.value = merged.aiProfile;
   aiIntensity.value = String(merged.aiIntensity);
+  if (masterBass) masterBass.value = String(merged.masterBass ?? 0);
+  if (masterMid) masterMid.value = String(merged.masterMid ?? 0);
+  if (masterHigh) masterHigh.value = String(merged.masterHigh ?? 0);
   sibilanceProtection.value = String(merged.sibilanceProtection);
   artifactProtection.value = String(merged.artifactProtection);
   referenceAmount.value = String(merged.referenceAmount);
@@ -3116,6 +3265,9 @@ function applyAIAutoRecommendation(analysis, source = {}, options = {}) {
   tapeWarmth.checked = recommendation.tapeWarmth;
   limiterCharacter.value = recommendation.limiterCharacter;
   aiIntensity.value = String(recommendation.aiIntensity);
+  if (masterBass) masterBass.value = String(recommendation.masterBass ?? 0);
+  if (masterMid) masterMid.value = String(recommendation.masterMid ?? 0);
+  if (masterHigh) masterHigh.value = String(recommendation.masterHigh ?? 0);
   sibilanceProtection.value = String(recommendation.sibilanceProtection);
   artifactProtection.value = String(recommendation.artifactProtection);
   referenceAmount.value = String(recommendation.referenceAmount);
@@ -3157,6 +3309,9 @@ function getArtifactSafeRecommendation(analysis, source = {}) {
     addPunch: false,
     tapeWarmth: false,
     addAir: false,
+    masterBass: Math.min(base.masterBass ?? 0, 0),
+    masterMid: Math.min(base.masterMid ?? 0, 0),
+    masterHigh: Math.min(base.masterHigh ?? 0, -0.5),
     glueCompression: false,
     autoLevel: false,
     referenceAmount: Math.min(base.referenceAmount ?? 65, 55),
@@ -3171,7 +3326,8 @@ function getArtifactSafeRecommendation(analysis, source = {}) {
 function getCurrentSourceDescriptor() {
   return {
     bitrateKbps: fileState.estimatedBitrateKbps,
-    isLossy: false
+    isLossy: Boolean(fileState.isLossySource),
+    format: fileState.sourceFormat || 'wav'
   };
 }
 
@@ -3198,7 +3354,7 @@ function applySourceSafeGain() {
   }
   updateSliderLabels();
   markCustomPreset();
-  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
   updateChecklist();
   showToast('Auto Gain applied from source analysis.', 'success', 1800);
 }
@@ -3214,6 +3370,7 @@ function resetMasteringFromAnalysis(options = {}) {
   if (reanalyze || !fileState.aiAnalysis) {
     fileState.aiAnalysis = analyzeAIGeneratedMastering(fileState.originalBuffer);
     fileState.aiAutoRecommendation = null;
+    fileState.aiPresetRecommendationCache = {};
   }
 
   clearReferenceState();
@@ -3225,7 +3382,7 @@ function resetMasteringFromAnalysis(options = {}) {
     { force: true }
   );
 
-  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
   updateOutputPresetButtons(outputPresets);
   updateChecklist();
 
@@ -3243,9 +3400,9 @@ function resetMasteringFromAnalysis(options = {}) {
 function applyAssistantPreset(name) {
   if (name === 'manual') {
     referenceMatch.checked = false;
-    applyModeDefaults(AI_MODE_DEFAULTS.manual, { aiEnhance: false });
+    applyModeDefaults(AI_MODE_DEFAULTS.manual, { aiEnhance: false, analysisAware: false });
     setAssistantPresetActive('manual');
-    schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+    schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
     updateOutputPresetButtons(outputPresets);
     updateChecklist();
     return;
@@ -3266,7 +3423,7 @@ function applyAssistantPreset(name) {
       { force: true }
     );
     referenceMatch.checked = false;
-    schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+    schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
     updateOutputPresetButtons(outputPresets);
     updateChecklist();
     return;
@@ -3277,7 +3434,9 @@ function applyAssistantPreset(name) {
     referenceMatch.checked = false;
   } else if (name === 'artifact-safe') {
     const analysisDefaults = fileState.aiAnalysis
-      ? getArtifactSafeRecommendation(fileState.aiAnalysis, getCurrentSourceDescriptor())
+      ? getCachedPresetRecommendation('artifact-safe', () => (
+        getArtifactSafeRecommendation(fileState.aiAnalysis, getCurrentSourceDescriptor())
+      ))
       : AI_MODE_DEFAULTS.artifactSafe;
     applyModeDefaults(analysisDefaults);
     referenceMatch.checked = false;
@@ -3287,13 +3446,16 @@ function applyAssistantPreset(name) {
   } else if (name === 'reference') {
     applyModeDefaults(AI_MODE_DEFAULTS.reference, { referenceTarget: true });
     referenceMatch.checked = true;
+  } else if (AI_MODE_DEFAULTS[name]) {
+    applyModeDefaults(AI_MODE_DEFAULTS[name]);
+    referenceMatch.checked = false;
   } else {
     applyModeDefaults(AI_MODE_DEFAULTS.auto);
     referenceMatch.checked = false;
   }
 
   setAssistantPresetActive(name);
-  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
   updateOutputPresetButtons(outputPresets);
   updateChecklist();
 }
@@ -3320,7 +3482,7 @@ function applyAIProfileSelectionDefaults() {
     setAssistantPresetActive('custom');
   }
 
-  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
   updateOutputPresetButtons(outputPresets);
   updateChecklist();
 }
@@ -3417,12 +3579,12 @@ aiIntensity.addEventListener('input', () => {
   aiIntensityValue.textContent = `${aiIntensity.value}%`;
   markCustomPreset();
   if (playerState.isPlaying && !playerState.isBypassed) {
-    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
+    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS, renderCache: false });
   }
 });
 
 aiIntensity.addEventListener('change', () => {
-  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
   updateChecklist();
 });
 
@@ -3430,12 +3592,12 @@ sibilanceProtection.addEventListener('input', () => {
   sibilanceProtectionValue.textContent = `${sibilanceProtection.value}%`;
   markCustomPreset();
   if (playerState.isPlaying && !playerState.isBypassed) {
-    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
+    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS, renderCache: false });
   }
 });
 
 sibilanceProtection.addEventListener('change', () => {
-  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
   updateChecklist();
 });
 
@@ -3443,13 +3605,29 @@ artifactProtection.addEventListener('input', () => {
   artifactProtectionValue.textContent = `${artifactProtection.value}%`;
   markCustomPreset();
   if (playerState.isPlaying && !playerState.isBypassed) {
-    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
+    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS, renderCache: false });
   }
 });
 
 artifactProtection.addEventListener('change', () => {
-  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
   updateChecklist();
+});
+
+[masterBass, masterMid, masterHigh].filter(Boolean).forEach(slider => {
+  slider.addEventListener('input', () => {
+    updateSliderLabels();
+    updateEQ();
+    markCustomPreset();
+    if (playerState.isPlaying && !playerState.isBypassed) {
+      schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS, renderCache: false });
+    }
+  });
+  slider.addEventListener('change', () => {
+    updateEQ();
+    schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
+    updateChecklist();
+  });
 });
 
 referenceMatch.addEventListener('change', () => {
@@ -3460,7 +3638,7 @@ referenceMatch.addEventListener('change', () => {
     return;
   }
   setAssistantPresetActive(referenceMatch.checked ? 'reference' : 'custom');
-  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
   updateChecklist();
 });
 
@@ -3468,21 +3646,21 @@ referenceAmount.addEventListener('input', () => {
   referenceAmountValue.textContent = `${referenceAmount.value}%`;
   setAssistantPresetActive(referenceMatch.checked && referenceName.textContent !== 'No reference' ? 'reference' : 'custom');
   if (playerState.isPlaying && !playerState.isBypassed) {
-    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
+    schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS, renderCache: false });
   }
 });
 
 referenceAmount.addEventListener('change', () => {
-  schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+  schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
   updateChecklist();
 });
 
 // truePeakSlider event listener removed - now using ceiling fader
 
 const levelMatchBtn = document.getElementById('levelMatchBtn');
-function syncLevelMatchControls(sourceChecked) {
-  levelMatchBtn.checked = sourceChecked;
-  if (levelMatchPanel) levelMatchPanel.checked = sourceChecked;
+function syncLevelMatchControls() {
+  levelMatchBtn.checked = true;
+  if (levelMatchPanel) levelMatchPanel.checked = true;
   updateChecklist();
 }
 
@@ -3534,8 +3712,8 @@ async function renormalizeAudio(newTargetLufs) {
 
   try {
     // Keep loudness changes non-blocking. Export/cache rendering uses the original
-    // buffer and final LUFS target; this background buffer only keeps level-matched
-    // bypass and live fallback close to the selected target.
+    // buffer and final LUFS target; this background buffer only keeps the live
+    // fallback close to the selected target. SOURCE ON always uses originalBuffer.
     await new Promise(resolve => setTimeout(resolve, 0));
 
     // WAV-only preview normalization: use peak-safe gain, never limiter-based
@@ -3556,7 +3734,7 @@ async function renormalizeAudio(newTargetLufs) {
     fileState.normalizedBuffer = normalizedBuffer;
     fileState.normalizedTargetLufs = newTargetLufs;
 
-    schedulePreviewUpdate({ immediate: playerState.isPlaying && !playerState.isBypassed });
+    schedulePreviewUpdate({ delayMs: COMMIT_RENDER_DEBOUNCE_MS });
 
   } catch (error) {
     console.error('Re-normalization failed:', error);
@@ -3580,7 +3758,7 @@ targetLufsSlider.addEventListener('input', () => {
     lufsDebounceTimeout = null;
   }
 
-  schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS });
+  schedulePreviewUpdate({ delayMs: LIVE_PREVIEW_RENDER_DEBOUNCE_MS, renderCache: false });
 
   // Debounce level-match buffer refresh; the audible/export chain reacts via cache render.
   lufsDebounceTimeout = setTimeout(() => {

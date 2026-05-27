@@ -483,6 +483,8 @@ body {
   width: auto;
   padding: 0 12px;
   gap: 6px;
+  min-width: 104px;
+  justify-content: center;
 }
 
 .btn-bypass .bypass-label {
@@ -497,6 +499,16 @@ body {
 
 .btn-bypass.active svg {
   opacity: 0.5;
+}
+
+.btn-bypass.fx-on {
+  background: var(--theme-accent);
+  border-color: var(--theme-accent);
+  color: var(--theme-background);
+}
+
+.btn-bypass.fx-on svg {
+  opacity: 1;
 }
 
 .level-match-container {

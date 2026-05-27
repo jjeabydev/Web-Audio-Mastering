@@ -14,6 +14,9 @@ export class Spectrogram {
         this.analyser = null;
         this.animationFrame = null;
         this.isVisible = false;
+        this.timelineBuffer = null;
+        this.playbackTime = 0;
+        this.timelineLabel = 'Source';
 
         // Parameters
         this.pt = 11; // 2^11 = 2048 samples (matches app.js analyser default)
@@ -90,6 +93,10 @@ export class Spectrogram {
     start() {
         if (!this.analyser || !this.ctx) return;
         this.isVisible = true;
+        if (this.timelineBuffer) {
+            this.draw();
+            return;
+        }
         this.loop();
     }
 
@@ -174,7 +181,82 @@ export class Spectrogram {
         this.updateLatestColumn(spectroWidth, spectroHeight, fftHalf);
     }
 
+    setTimelineBuffer(audioBuffer, label = 'Source') {
+        if (audioBuffer && audioBuffer === this.timelineBuffer && label === this.timelineLabel) {
+            if (this.isVisible) this.draw();
+            return;
+        }
+        this.timelineBuffer = audioBuffer || null;
+        this.timelineLabel = label;
+        this.playbackTime = Math.max(0, Math.min(this.playbackTime, audioBuffer?.duration || 0));
+        if (!audioBuffer || !this.imageDataCache) {
+            this.clear();
+            return;
+        }
+
+        this.sampleRate = audioBuffer.sampleRate;
+        this.renderTimelineBuffer(audioBuffer);
+        if (this.isVisible) this.draw();
+    }
+
+    setPlaybackTime(time = 0) {
+        this.playbackTime = Math.max(0, Math.min(time, this.timelineBuffer?.duration || time));
+        if (this.isVisible && this.timelineBuffer) this.draw();
+    }
+
+    clear() {
+        if (!this.imageDataCache) return;
+        const data = this.imageDataCache.data;
+        for (let i = 0; i < data.length; i += 4) {
+            data[i] = 0;
+            data[i + 1] = 0;
+            data[i + 2] = 0;
+            data[i + 3] = 255;
+        }
+        if (this.isVisible) this.draw();
+    }
+
+    renderTimelineBuffer(audioBuffer) {
+        const width = 1024;
+        const height = 256;
+        const fftHalf = this.fftSize >> 1;
+        const channelCount = Math.min(2, audioBuffer.numberOfChannels);
+
+        for (let x = 0; x < width; x++) {
+            const center = Math.round((x / Math.max(1, width - 1)) * Math.max(0, audioBuffer.length - 1));
+            const start = center - (this.fftSize >> 1);
+
+            this.imag.fill(0);
+            for (let i = 0; i < this.fftSize; i++) {
+                const sampleIndex = start + i;
+                let sample = 0;
+                if (sampleIndex >= 0 && sampleIndex < audioBuffer.length) {
+                    for (let ch = 0; ch < channelCount; ch++) {
+                        sample += audioBuffer.getChannelData(ch)[sampleIndex];
+                    }
+                    sample /= channelCount;
+                }
+                this.real[i] = sample * this.window[i];
+            }
+
+            this.fft(this.real, this.imag);
+            const correctionAC = 10 * Math.log10(16);
+            const fftNorm = -20 * Math.log10(this.fftSize);
+            for (let i = 0; i < fftHalf; i++) {
+                const rawPower = this.real[i] * this.real[i] + this.imag[i] * this.imag[i];
+                const db = 10 * Math.log10(rawPower + 1e-24) + correctionAC + fftNorm;
+                this.spectrum[i] = db < -144 ? -144 : db;
+            }
+
+            this.updateColumn(x, width, height, fftHalf);
+        }
+    }
+
     updateLatestColumn(width, height, fftHalf) {
+        this.updateColumn(width - 1, width, height, fftHalf);
+    }
+
+    updateColumn(x, width, height, fftHalf) {
         const minFreq = 20;
         const maxFreq = 22000; // Cap at 22k for visibility
         const nyquist = this.sampleRate / 2;
@@ -202,11 +284,11 @@ export class Spectrogram {
             }
 
             // Write to buffer
-            this.spectrogramBuffer[y * width + (width - 1)] = dbValue;
+            this.spectrogramBuffer[y * width + x] = dbValue;
 
             // Write to Image Data
             const color = this.dbToColor(dbValue);
-            const offset = (y * width + (width - 1)) * 4;
+            const offset = (y * width + x) * 4;
             this.imageDataCache.data[offset] = color[0];
             this.imageDataCache.data[offset + 1] = color[1];
             this.imageDataCache.data[offset + 2] = color[2];
@@ -307,6 +389,18 @@ export class Spectrogram {
 
         // Draw scaled to main canvas
         this.ctx.drawImage(this.tempCanvas, 0, 0, 1024, 256, 0, 0, w, h);
+
+        if (this.timelineBuffer?.duration) {
+            const x = Math.max(0, Math.min(w, (this.playbackTime / this.timelineBuffer.duration) * w));
+            this.ctx.fillStyle = 'rgba(255,255,255,0.92)';
+            this.ctx.fillRect(x - 1, 0, 2, h);
+            this.ctx.fillStyle = 'rgba(17,17,17,0.82)';
+            this.ctx.fillRect(8, 8, 108, 22);
+            this.ctx.fillStyle = '#BCB1E7';
+            this.ctx.font = '12px Inter, sans-serif';
+            this.ctx.textAlign = 'left';
+            this.ctx.fillText(this.timelineLabel, 14, 23);
+        }
 
         // Draw Grid (Simplified)
         this.ctx.strokeStyle = '#444';

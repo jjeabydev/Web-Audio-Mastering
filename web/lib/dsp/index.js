@@ -192,6 +192,7 @@ export {
   applySourceDifferentialToneGuard,
   applySourceConstrainedSibilanceRepair,
   applySourceConstrainedVocalBuzzRepair,
+  applySourceConstrainedNoiseVeto,
   applyReferenceMatch,
   applyLimiterStressGuard,
   applyStereoStabilityGuard,

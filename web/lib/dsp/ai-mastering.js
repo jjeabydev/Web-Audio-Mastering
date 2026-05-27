@@ -1,10 +1,10 @@
 /**
- * AI-generated / lossy-source mastering repair.
+ * Generated-source mastering analysis and source-constrained repair.
  *
- * AI-generated MP3 exports often arrive with hyped upper mids, smeared air,
- * loose sub energy, and a stereo image that feels wide but collapses poorly.
- * This module adds a conservative, analysis-driven correction pass before the
- * color/loudness stages so the rest of the chain has a cleaner source to lift.
+ * WAV sources use transparent, source-constrained guards so mastering can
+ * improve level and balance without adding hiss, fizz, crackle, or sibilance
+ * that was not already present in the source. Lossy sources can still use the
+ * stronger repair path when explicitly detected by file format.
  */
 
 import { applyBiquadFilter, calculateRMS, dbToLinear, linearToDb } from './utils.js';
@@ -1962,6 +1962,160 @@ export function applySourceConstrainedVocalBuzzRepair(processedBuffer, sourceBuf
   };
 }
 
+export function applySourceConstrainedNoiseVeto(processedBuffer, sourceBuffer, options = {}) {
+  const amount = clamp(options.amount ?? 0.82, 0, 1);
+  if (!processedBuffer || !sourceBuffer || amount <= 0) {
+    return { buffer: processedBuffer, moves: null };
+  }
+  if (
+    processedBuffer.sampleRate !== sourceBuffer.sampleRate ||
+    processedBuffer.length !== sourceBuffer.length
+  ) {
+    return {
+      buffer: processedBuffer,
+      moves: { skipped: true, reason: 'source-mismatch' }
+    };
+  }
+
+  const sampleRate = processedBuffer.sampleRate;
+  const length = processedBuffer.length;
+  const channels = Math.min(processedBuffer.numberOfChannels, sourceBuffer.numberOfChannels);
+  let output = createBufferLike(processedBuffer);
+  const bands = options.bands || [
+    { freq: 1700, q: 0.62, weight: 0.22 },
+    { freq: 2300, q: 0.72, weight: 0.4 },
+    { freq: 3200, q: 0.82, weight: 0.66 },
+    { freq: 4500, q: 0.92, weight: 0.82 },
+    { freq: 6500, q: 1.02, weight: 1.0 },
+    { freq: 8800, q: 1.04, weight: 0.92 },
+    { freq: 11800, q: 0.92, weight: 0.7 }
+  ];
+  const attack = Math.exp(-1 / Math.max(1, sampleRate * ((options.attackMs ?? 0.18) / 1000)));
+  const release = Math.exp(-1 / Math.max(1, sampleRate * ((options.releaseMs ?? 92) / 1000)));
+  const detectorAttack = Math.exp(-1 / Math.max(1, sampleRate * ((options.detectorAttackMs ?? 0.2) / 1000)));
+  const detectorRelease = Math.exp(-1 / Math.max(1, sampleRate * ((options.detectorReleaseMs ?? 28) / 1000)));
+  const broadAttack = Math.exp(-1 / Math.max(1, sampleRate * ((options.broadAttackMs ?? 1.2) / 1000)));
+  const broadRelease = Math.exp(-1 / Math.max(1, sampleRate * ((options.broadReleaseMs ?? 120) / 1000)));
+  const allowedIncrease = options.allowedIncrease ?? 0.004;
+  const threshold = options.threshold ?? 0.006;
+  const ratioRange = Math.max(0.045, options.ratio ?? 0.16);
+  const maxMix = clamp(options.maxMix ?? 0.72, 0, 0.92);
+  const maxBandReduction = clamp(options.maxBandReduction ?? 0.72, 0.08, 0.96);
+  const minBroad = options.minBroad ?? 0.0022;
+  const minBand = options.minBand ?? 0.0018;
+  const curvatureAllowance = options.curvatureAllowance ?? 0.18;
+  let totalActiveSamples = 0;
+  let peakMix = 0;
+  const bandMoves = [];
+
+  for (const band of bands) {
+    const processedBand = applyFilterToBuffer(output, 'bandpass', band.freq, 0.1, band.q);
+    const sourceBand = applyFilterToBuffer(sourceBuffer, 'bandpass', band.freq, 0.1, band.q);
+    const next = createBufferLike(output);
+    let bandActiveSamples = 0;
+    let bandPeakMix = 0;
+
+    for (let ch = 0; ch < channels; ch++) {
+      const processed = output.getChannelData(ch);
+      const source = sourceBuffer.getChannelData(ch);
+      const procBand = processedBand.getChannelData(ch);
+      const srcBand = sourceBand.getChannelData(ch);
+      const out = next.getChannelData(ch);
+      let procEnv = 0;
+      let srcEnv = 0;
+      let procBroad = 0;
+      let srcBroad = 0;
+      let env = 0;
+
+      for (let i = 2; i < length - 2; i++) {
+        const procBandAbs = Math.abs(procBand[i]);
+        const srcBandAbs = Math.abs(srcBand[i]);
+        const procAbs = Math.abs(processed[i]);
+        const srcAbs = Math.abs(source[i]);
+
+        procEnv = procBandAbs > procEnv
+          ? detectorAttack * procEnv + (1 - detectorAttack) * procBandAbs
+          : detectorRelease * procEnv + (1 - detectorRelease) * procBandAbs;
+        srcEnv = srcBandAbs > srcEnv
+          ? detectorAttack * srcEnv + (1 - detectorAttack) * srcBandAbs
+          : detectorRelease * srcEnv + (1 - detectorRelease) * srcBandAbs;
+        procBroad = procAbs > procBroad
+          ? broadAttack * procBroad + (1 - broadAttack) * procAbs
+          : broadRelease * procBroad + (1 - broadRelease) * procAbs;
+        srcBroad = srcAbs > srcBroad
+          ? broadAttack * srcBroad + (1 - broadAttack) * srcAbs
+          : broadRelease * srcBroad + (1 - broadRelease) * srcAbs;
+
+        const sourceScale = clamp(procBroad / Math.max(minBroad, srcBroad), 0.72, options.maxSourceScale ?? 1.28);
+        const sourceAligned = srcBand[i] * sourceScale;
+        const procRatio = procEnv / Math.max(minBroad, procBroad);
+        const srcRatio = (srcEnv * sourceScale) / Math.max(minBroad, procBroad);
+        const addedRatio = procRatio - srcRatio * (1 + allowedIncrease);
+
+        const procCurvature = Math.abs(procBand[i - 1] - procBand[i] * 2 + procBand[i + 1]);
+        const srcCurvature = Math.abs(srcBand[i - 1] - srcBand[i] * 2 + srcBand[i + 1]) * sourceScale;
+        const roughExcess = procCurvature - srcCurvature * (1 + curvatureAllowance);
+        const roughGate = clamp(
+          roughExcess / Math.max(minBand, procEnv * 0.28, minBroad * 0.42),
+          0,
+          1
+        );
+        const energyGate = clamp(
+          (procEnv - srcEnv * sourceScale * (1 + allowedIncrease) - minBand * 0.2) /
+            Math.max(minBand, minBand * 1.35),
+          0,
+          1
+        );
+        const ratioTarget = clamp((addedRatio - threshold) / ratioRange, 0, 1);
+        const target = Math.max(ratioTarget * energyGate, roughGate * energyGate * 0.78) *
+          amount *
+          (band.weight ?? 1);
+
+        env = target > env
+          ? attack * env + (1 - attack) * target
+          : release * env + (1 - release) * target;
+        const mix = Math.min(maxMix, env);
+
+        if (mix > 0.012) {
+          bandActiveSamples++;
+          totalActiveSamples++;
+        }
+        if (mix > bandPeakMix) bandPeakMix = mix;
+        if (mix > peakMix) peakMix = mix;
+
+        const addedBand = Math.max(
+          0,
+          Math.abs(procBand[i]) - Math.abs(sourceAligned) * (1 + allowedIncrease)
+        );
+        const bandReduction = Math.min(
+          maxBandReduction,
+          mix * addedBand / Math.max(minBand, Math.abs(procBand[i]))
+        );
+        out[i] = processed[i] - procBand[i] * bandReduction;
+      }
+    }
+
+    output = next;
+    bandMoves.push({
+      freq: band.freq,
+      activeRatio: bandActiveSamples / Math.max(1, length * channels),
+      peakMix: bandPeakMix
+    });
+  }
+
+  return {
+    buffer: output,
+    moves: {
+      skipped: totalActiveSamples === 0,
+      amount,
+      allowedIncrease,
+      activeRatio: totalActiveSamples / Math.max(1, length * channels * bands.length),
+      peakMix,
+      bands: bandMoves
+    }
+  };
+}
+
 export function getAIMasteringRecommendation(analysis, source = {}) {
   const profile = chooseAIMasteringProfile(analysis, 'auto');
   const { harshDB, metallicDB = -18, airDB, mudDB, subToBassDB, presenceToBodyDB = 0 } = analysis.profile;
@@ -2068,6 +2222,13 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
     harshDB < -12.5 &&
     metallicDB < -15;
   const autoLevel = (peaks.dynamicSpreadDB ?? 0) > 7.5 && !clippedOrPinned;
+  const masterBass = clamp(
+    subToBassDB < -4 && limiterRisk <= 0.45 ? 0.5 : subToBassDB > 2 ? -0.5 : 0,
+    -0.5,
+    0.5
+  );
+  const masterMid = muddyOrVeiled ? -0.5 : (!fragileHighs && presenceToBodyDB < -8 ? 0.5 : 0);
+  const masterHigh = darkButSafe ? 0.5 : (fragileHighs || artifactRescueRisk ? -0.5 : 0);
 
   return {
     profile: profile.name,
@@ -2079,6 +2240,9 @@ export function getAIMasteringRecommendation(analysis, source = {}) {
     sibilanceProtection: roundToStep(sibilanceProtection * 100, 5),
     artifactProtection: roundToStep(artifactProtection * 100, 5),
     referenceAmount: 65,
+    masterBass,
+    masterMid,
+    masterHigh,
     stereoWidth,
     centerBass: true,
     cleanLowEnd: true,

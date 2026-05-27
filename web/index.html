@@ -73,8 +73,8 @@
           <div class="drop-icon">📂</div>
           <p>Drop audio file here or</p>
           <button id="selectFile" class="btn-select">Browse Files</button>
-          <input type="file" id="fileInput" accept="audio/wav,.wav" hidden>
-          <span class="file-types">WAV only</span>
+          <input type="file" id="fileInput" accept="audio/wav,audio/x-wav,audio/mpeg,.wav,.mp3" hidden>
+          <span class="file-types">WAV / MP3</span>
         </div>
         <div class="file-loaded hidden" id="fileLoaded">
           <div class="file-header">
@@ -118,19 +118,19 @@
               <span id="duration" class="time">0:00</span>
               <div class="transport-spacer"></div>
 
-              <label class="level-match-container" title="Match Level (Preview uses normalized audio)">
-                <input type="checkbox" id="levelMatchBtn" checked>
-                <span>Lvl Match</span>
+              <label class="level-match-container" title="SOURCE ON plays the exact original file, without gain matching or normalization.">
+                <input type="checkbox" id="levelMatchBtn" checked disabled>
+                <span>Exact Source</span>
               </label>
 
-              <button id="bypassBtn" class="transport-btn btn-bypass" title="Toggle Effects">
+              <button id="bypassBtn" class="transport-btn btn-bypass fx-on" title="Toggle Source/Master comparison">
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
                   <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
                   <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
                 </svg>
-                <span class="bypass-label">FX</span>
+                <span class="bypass-label">MASTER ON</span>
               </button>
               <button id="spectroBtn" class="transport-btn btn-bypass" title="Toggle Spectrogram">
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
@@ -186,6 +186,22 @@
             data-tip="Use when you want a louder, more forward commercial master. If it distorts, switch back to AI Auto or AI Clean.">AI Loud</button>
           <button class="assistant-preset" type="button" data-mastering-preset="reference"
             data-tip="Load a commercial song you like. The master will move toward that track's tonal balance and loudness character.">Match Ref</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="universal"
+            data-tip="BandLab-style all-purpose preset. Reuses the saved upload analysis, then adds balanced loudness and translation without extra color.">Universal</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="fire"
+            data-tip="BandLab-style loud and energetic preset. Reuses saved analysis and limits loudness/highs automatically if artifacts are likely.">Fire</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="clarity"
+            data-tip="BandLab-style clarity preset. Reuses saved analysis to clear low-mid fog while protecting sibilance.">Clarity</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="tape"
+            data-tip="BandLab-style tape preset. Reuses saved analysis for a warmer, smoother master with less bright edge.">Tape</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="natural"
+            data-tip="BandLab-style natural preset. Reuses saved analysis for conservative tone and safer WAV mastering.">Natural</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="spatial"
+            data-tip="BandLab-style spatial preset. Reuses saved analysis to add controlled openness while keeping bass centered.">Spatial</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="cinematic"
+            data-tip="BandLab-style cinematic preset. Reuses saved analysis for more weight and space with safe limiter pressure.">Cinematic</button>
+          <button class="assistant-preset" type="button" data-mastering-preset="punchy"
+            data-tip="BandLab-style punch preset. Reuses saved analysis for more impact, then backs off if transients or vocals may crackle.">Punch</button>
           <button class="assistant-preset custom-state hidden" type="button" data-mastering-preset="custom"
             data-tip="You changed detailed controls after choosing a preset. AI Mastering is still active; this is your custom version.">Custom</button>
         </div>
@@ -275,18 +291,33 @@
             <input type="range" id="aiIntensity" min="50" max="150" step="5" value="105">
             <span class="slider-value" id="aiIntensityValue">105%</span>
           </div>
+          <div class="slider-row" data-tip="Broad mastering bass trim. Keep moves small; big boosts can make the limiter pump.">
+            <span>Bass</span>
+            <input type="range" id="masterBass" min="-3" max="3" step="0.5" value="0">
+            <span class="slider-value" id="masterBassValue">0.0 dB</span>
+          </div>
+          <div class="slider-row" data-tip="Broad vocal/body mid trim. Lower slightly if the song feels boxy; raise slightly if vocals feel too far back.">
+            <span>Mid</span>
+            <input type="range" id="masterMid" min="-3" max="3" step="0.5" value="0">
+            <span class="slider-value" id="masterMidValue">0.0 dB</span>
+          </div>
+          <div class="slider-row" data-tip="Broad high trim. Positive boosts are capped by source safety so new hiss, fizz, or sibilance is not added.">
+            <span>High</span>
+            <input type="range" id="masterHigh" min="-3" max="3" step="0.5" value="0">
+            <span class="slider-value" id="masterHighValue">0.0 dB</span>
+          </div>
           <div class="slider-row advanced-control" data-tip="Controls harsh S/F sounds, splashy cymbals, and brittle AI high-frequency artifacts.">
             <span>Sibilance</span>
             <input type="range" id="sibilanceProtection" min="0" max="100" step="5" value="65">
             <span class="slider-value" id="sibilanceProtectionValue">65%</span>
           </div>
-          <div class="slider-row" data-tip="If piano or high notes crackle, raise this first. Use 90-95% as a rescue setting; lower it if the master gets dull.">
-            <span>Metallic</span>
-            <input type="range" id="artifactProtection" min="0" max="100" step="5" value="70">
+          <div class="slider-row" data-tip="Protection against metallic fizz, crackle, and sharp S/T/CH sounds. It never adds metallic tone; lower values are blocked from unsafe WAV mastering.">
+            <span>Metallic Guard</span>
+            <input type="range" id="artifactProtection" min="70" max="100" step="5" value="70">
             <span class="slider-value" id="artifactProtectionValue">70%</span>
           </div>
           <div class="control-help">
-            Start around 70-85 for best tone. If piano or high notes crackle, raise Metallic to 90-95. If it gets dull, lower Metallic or Intensity.
+            Start around 70-85 for best tone. If piano, vocals, or guitars crackle, raise Metallic Guard to 90-95. If it gets dull, lower Intensity or High first.
           </div>
           <label class="toggle-row"
             data-tip="Match tonal balance, loudness behavior, and safe stereo width toward a loaded reference track.">
@@ -298,7 +329,7 @@
             <button id="selectReference" class="mini-btn" type="button">Ref</button>
             <span id="referenceName" class="reference-name">No reference</span>
             <button id="clearReference" class="mini-btn ghost" type="button">Clear</button>
-            <input type="file" id="referenceInput" accept="audio/wav,.wav" hidden>
+            <input type="file" id="referenceInput" accept="audio/wav,audio/x-wav,audio/mpeg,.wav,.mp3" hidden>
           </div>
           <div class="slider-row" data-tip="How strongly to follow the reference. Keep below 80% for safer mastering.">
             <span>Match</span>
@@ -451,9 +482,9 @@
             New uploads start fresh with AI Auto. Use Reset to return to the latest analysis, Analyze + Reset to measure again, or Clear to start over.
           </div>
           <label class="toggle-row compact-toggle"
-            data-tip="Keep enabled when comparing FX on/off. The original preview is level-matched so louder does not automatically sound better.">
-            <span>Volume Match</span>
-            <input type="checkbox" id="levelMatchPanel" checked>
+            data-tip="SOURCE ON always plays the exact original file. No normalization or level matching is applied to source comparison.">
+            <span>Exact Source</span>
+            <input type="checkbox" id="levelMatchPanel" checked disabled>
             <span class="toggle"></span>
           </label>
           <div class="loudness-faders">

@@ -49,6 +49,9 @@ const glueCompression = document.getElementById('glueCompression');
 const aiEnhance = document.getElementById('aiEnhance');
 const aiProfile = document.getElementById('aiProfile');
 const aiIntensity = document.getElementById('aiIntensity');
+const masterBass = document.getElementById('masterBass');
+const masterMid = document.getElementById('masterMid');
+const masterHigh = document.getElementById('masterHigh');
 const sibilanceProtection = document.getElementById('sibilanceProtection');
 const artifactProtection = document.getElementById('artifactProtection');
 const referenceMatch = document.getElementById('referenceMatch');
@@ -67,6 +70,14 @@ const ditherNoiseShaping = document.getElementById('ditherNoiseShaping');
 const targetLufsSlider = document.getElementById('targetLufs');
 
 let referenceAnalysis = null;
+let currentSourceFormat = 'wav';
+let currentSourceIsLossy = false;
+
+export function setCurrentSourceFormat(format = 'wav') {
+  const normalized = String(format || 'wav').toLowerCase();
+  currentSourceFormat = normalized === 'mp3' ? 'mp3' : 'wav';
+  currentSourceIsLossy = currentSourceFormat === 'mp3';
+}
 
 export function setReferenceAnalysis(analysis) {
   referenceAnalysis = analysis || null;
@@ -81,6 +92,9 @@ export function setReferenceAnalysis(analysis) {
  * @returns {Object} Current settings object
  */
 export function getCurrentSettings() {
+  const rawArtifactProtection = (parseFloat(artifactProtection?.value) || 70) / 100;
+  const safeArtifactProtection = Math.max(rawArtifactProtection, 0.7);
+
   return {
     normalizeLoudness: normalizeLoudness.checked,
     targetLufs: parseFloat(targetLufsSlider.value),
@@ -100,13 +114,17 @@ export function getCurrentSettings() {
     aiProfile: aiProfile?.value || 'auto',
     artifactRescueMode: false,
     aiIntensity: (parseFloat(aiIntensity?.value) || 100) / 100,
+    masterBass: parseFloat(masterBass?.value) || 0,
+    masterMid: parseFloat(masterMid?.value) || 0,
+    masterHigh: parseFloat(masterHigh?.value) || 0,
     sibilanceProtection: (parseFloat(sibilanceProtection?.value) || 0) / 100,
-    artifactProtection: (parseFloat(artifactProtection?.value) || 0) / 100,
+    artifactProtection: safeArtifactProtection,
     referenceMatch: referenceMatch?.checked ?? false,
     referenceAmount: (parseFloat(referenceAmount?.value) || 65) / 100,
     referenceAnalysis,
     addPunch: addPunch.checked,
-    isLossySource: false,
+    isLossySource: currentSourceIsLossy,
+    sourceFormat: currentSourceFormat,
     inputGain: inputGainValue,
     eqLow: eqValues.low,
     eqLowMid: eqValues.lowMid,

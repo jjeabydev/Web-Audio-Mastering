@@ -299,9 +299,10 @@ export function setupTransportListeners(handlers = {}) {
       playerState.isBypassed = !playerState.isBypassed;
       const bypassLabel = bypassBtn.querySelector('.bypass-label');
       if (bypassLabel) {
-        bypassLabel.textContent = playerState.isBypassed ? 'OFF' : 'FX';
+        bypassLabel.textContent = playerState.isBypassed ? 'SOURCE ON' : 'MASTER ON';
       }
       bypassBtn.classList.toggle('active', playerState.isBypassed);
+      bypassBtn.classList.toggle('fx-on', !playerState.isBypassed);
       if (onBypassToggle) onBypassToggle(playerState.isBypassed);
     });
   }

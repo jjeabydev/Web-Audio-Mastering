@@ -12,6 +12,7 @@ import {
   applySourceDifferentialToneGuard,
   applySourceConstrainedSibilanceRepair,
   applySourceConstrainedVocalBuzzRepair,
+  applySourceConstrainedNoiseVeto,
   applyMetallicRescueTone,
   applyArtifactSafeAirRecovery,
   chooseAIMasteringProfile,
@@ -1370,6 +1371,54 @@ describe('AI-generated mastering repair', () => {
 
     expect(repaired.moves.activeRatio).toBeGreaterThan(0);
     expect(afterDistance).toBeLessThan(beforeDistance * 0.82);
+  });
+
+  it('vetoes added mid/high mechanical noise without flattening unchanged material', () => {
+    const source = makeToneBuffer({
+      frequencies: [
+        [160, 0.06],
+        [720, 0.052],
+        [1500, 0.034],
+        [2600, 0.018]
+      ]
+    });
+    const processed = makeToneBuffer({
+      frequencies: [
+        [160, 0.06],
+        [720, 0.052],
+        [1500, 0.034],
+        [2600, 0.018]
+      ]
+    });
+    const sourceChannel = source.getChannelData(0);
+    const processedChannel = processed.getChannelData(0);
+    const start = 16000;
+    const end = start + 540;
+    for (let i = start; i < end; i++) {
+      const t = (i - start) / processed.sampleRate;
+      const envelope = Math.sin(Math.PI * (i - start) / (end - start));
+      processedChannel[i] += (
+        Math.sin(2 * Math.PI * 4300 * t) * 0.022 +
+        Math.sin(2 * Math.PI * 6900 * t) * 0.018 +
+        (i % 2 === 0 ? 1 : -1) * 0.006
+      ) * envelope;
+    }
+
+    const beforeDistance = windowRms(processedChannel, start, end) - windowRms(sourceChannel, start, end);
+    const repaired = applySourceConstrainedNoiseVeto(processed, source, {
+      amount: 1,
+      allowedIncrease: 0.002,
+      threshold: 0.0035,
+      ratio: 0.12,
+      maxMix: 0.86,
+      maxBandReduction: 0.84
+    });
+    const after = repaired.buffer.getChannelData(0);
+    const afterDistance = windowRms(after, start, end) - windowRms(sourceChannel, start, end);
+
+    expect(repaired.moves.activeRatio).toBeGreaterThan(0);
+    expect(afterDistance).toBeLessThan(beforeDistance * 0.72);
+    expect(Math.abs(after[5000] - processedChannel[5000])).toBeLessThan(0.0015);
   });
 
   it('does not build up new vocal fizz when the source-constrained repair is repeated', () => {

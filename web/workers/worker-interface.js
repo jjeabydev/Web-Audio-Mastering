@@ -8,7 +8,7 @@
  *   const { channels } = await dspWorker.normalize(audioBuffer, -14, -1, onProgress);
  */
 
-export const DSP_RENDER_REVISION = '2026-05-23-wav-only-transparent-master-v39';
+export const DSP_RENDER_REVISION = '2026-05-26-metallic-guard-floor-v55';
 
 export class DSPWorkerInterface {
   constructor() {

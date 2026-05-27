@@ -8,7 +8,7 @@
  * - Progress: { id: number, type: 'PROGRESS', progress: number, status: string }
  */
 
-const DSP_RENDER_REVISION = '2026-05-23-wav-only-transparent-master-v39';
+const DSP_RENDER_REVISION = '2026-05-26-metallic-guard-floor-v55';
 
 // Import DSP modules
 import {
@@ -44,6 +44,7 @@ import {
   applySourceDifferentialToneGuard,
   applySourceConstrainedSibilanceRepair,
   applySourceConstrainedVocalBuzzRepair,
+  applySourceConstrainedNoiseVeto,
   finalizeMasteringTarget
 } from '../lib/dsp/index.js';
 
@@ -86,6 +87,212 @@ globalThis.AudioBuffer = WorkerAudioBuffer;
  */
 function sendProgress(id, progress, status) {
   self.postMessage({ id, type: 'PROGRESS', progress, status });
+}
+
+function calcPeakingCoeffs(sampleRate, frequency, gainDB, Q = 1) {
+  const A = Math.pow(10, gainDB / 40);
+  const w0 = 2 * Math.PI * frequency / sampleRate;
+  const cosW0 = Math.cos(w0);
+  const sinW0 = Math.sin(w0);
+  const alpha = sinW0 / (2 * Q);
+  const b0 = 1 + alpha * A;
+  const b1 = -2 * cosW0;
+  const b2 = 1 - alpha * A;
+  const a0 = 1 + alpha / A;
+  const a1 = -2 * cosW0;
+  const a2 = 1 - alpha / A;
+  return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
+}
+
+function calcShelfCoeffs(sampleRate, type, frequency, gainDB, Q = 0.707) {
+  const A = Math.pow(10, gainDB / 40);
+  const w0 = 2 * Math.PI * frequency / sampleRate;
+  const cosW0 = Math.cos(w0);
+  const sinW0 = Math.sin(w0);
+  const alpha = sinW0 / (2 * Q);
+  const beta = 2 * Math.sqrt(A) * alpha;
+  let b0, b1, b2, a0, a1, a2;
+
+  if (type === 'lowshelf') {
+    b0 = A * ((A + 1) - (A - 1) * cosW0 + beta);
+    b1 = 2 * A * ((A - 1) - (A + 1) * cosW0);
+    b2 = A * ((A + 1) - (A - 1) * cosW0 - beta);
+    a0 = (A + 1) + (A - 1) * cosW0 + beta;
+    a1 = -2 * ((A - 1) + (A + 1) * cosW0);
+    a2 = (A + 1) + (A - 1) * cosW0 - beta;
+  } else {
+    b0 = A * ((A + 1) + (A - 1) * cosW0 + beta);
+    b1 = -2 * A * ((A - 1) + (A + 1) * cosW0);
+    b2 = A * ((A + 1) + (A - 1) * cosW0 - beta);
+    a0 = (A + 1) - (A - 1) * cosW0 + beta;
+    a1 = 2 * ((A - 1) - (A + 1) * cosW0);
+    a2 = (A + 1) - (A - 1) * cosW0 - beta;
+  }
+
+  return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
+}
+
+function applyBiquadPolish(buffer, filters) {
+  if (!filters.length) return buffer;
+  const output = new AudioBuffer({
+    numberOfChannels: buffer.numberOfChannels,
+    length: buffer.length,
+    sampleRate: buffer.sampleRate
+  });
+
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    let channel = buffer.getChannelData(ch).slice();
+    filters.forEach(filter => {
+      channel = applyBiquadFilter(channel, filter.coeffs);
+    });
+    output.copyToChannel(channel, ch);
+  }
+  return output;
+}
+
+function applyLosslessCommercialPolish(buffer, sourceReferenceBuffer, settings) {
+  if (!buffer || !sourceReferenceBuffer || buffer.sampleRate !== sourceReferenceBuffer.sampleRate || buffer.length !== sourceReferenceBuffer.length) {
+    return { buffer, moves: { skipped: true, reason: 'source-shape-mismatch' } };
+  }
+
+  const analysis = analyzeAIGeneratedMastering(sourceReferenceBuffer);
+  const profile = analysis.profile || {};
+  const peaks = analysis.peaks || {};
+  const filters = [];
+  const moves = {};
+
+  if ((profile.mudDB ?? -18) > -8.5 || settings.cutMud) {
+    const cut = Math.max(-1.4, Math.min(-0.45, -0.55 - Math.max(0, (profile.mudDB ?? -8.5) + 8.5) * 0.18));
+    filters.push({ coeffs: calcPeakingCoeffs(buffer.sampleRate, 260, cut, 0.95) });
+    moves.mudCutDB = cut;
+  }
+
+  if ((profile.bodyDB ?? -18) > -7.8 && (profile.presenceToBodyDB ?? 0) < -7.5) {
+    filters.push({ coeffs: calcPeakingCoeffs(buffer.sampleRate, 430, -0.45, 0.8) });
+    moves.lowMidCleanDB = -0.45;
+  }
+
+  const canOpenAir =
+    (profile.airDB ?? -18) < -24 &&
+    (profile.harshDB ?? -18) < -14.8 &&
+    (profile.metallicDB ?? -18) < -17.8 &&
+    (peaks.spikeDensity ?? 0) < 0.006;
+  if (canOpenAir) {
+    filters.push({ coeffs: calcShelfCoeffs(buffer.sampleRate, 'highshelf', 12500, 0.25, 0.55) });
+    moves.airLiftDB = 0.25;
+  }
+
+  let polished = applyBiquadPolish(buffer, filters);
+  const channels = Array.from({ length: polished.numberOfChannels }, (_, ch) => polished.getChannelData(ch));
+  const peak = findTruePeakFromChannels(channels);
+  const lufs = measureLUFS(polished);
+  const ceiling = Number.isFinite(Number(settings.truePeakCeiling)) ? Number(settings.truePeakCeiling) : -1.5;
+  const target = Math.min(Number.isFinite(Number(settings.targetLufs)) ? Number(settings.targetLufs) : -14, -14);
+  const gainDB = Math.min(0.45, target - lufs, ceiling - 0.8 - peak);
+  if (Number.isFinite(gainDB) && gainDB > 0.05) {
+    const gainLin = Math.pow(10, gainDB / 20);
+    for (let ch = 0; ch < polished.numberOfChannels; ch++) {
+      const data = polished.getChannelData(ch);
+      for (let i = 0; i < data.length; i++) data[i] *= gainLin;
+    }
+    moves.peakSafeGainDB = gainDB;
+  }
+
+  return { buffer: polished, moves };
+}
+
+function applyLosslessSourceArtifactGuard(buffer, sourceReferenceBuffer) {
+  if (!buffer || !sourceReferenceBuffer || buffer.sampleRate !== sourceReferenceBuffer.sampleRate || buffer.length !== sourceReferenceBuffer.length) {
+    return { buffer, moves: { skipped: true, reason: 'source-shape-mismatch' } };
+  }
+
+  const moves = {};
+  let guardedBuffer = buffer;
+  const toneGuarded = applySourceDifferentialToneGuard(guardedBuffer, sourceReferenceBuffer, {
+    amount: 0.72,
+    presenceAllowanceDB: 0.06,
+    harshAllowanceDB: 0.06,
+    metallicAllowanceDB: 0.05,
+    airAllowanceDB: 0.08,
+    maxFizzCutDB: 1.6,
+    maxSibilanceCutDB: 2.0,
+    maxMetallicCutDB: 1.8,
+    maxAirCutDB: 1.2
+  });
+  guardedBuffer = toneGuarded.buffer;
+  moves.toneGuard = toneGuarded.moves || null;
+
+  const sourceConstrained = applySourceConstrainedSibilanceRepair(guardedBuffer, sourceReferenceBuffer, {
+    amount: 0.62,
+    allowedIncrease: 0.006,
+    threshold: 0.008,
+    ratio: 0.18,
+    maxMix: 0.42,
+    bands: [
+      { freq: 2400, q: 0.8, weight: 0.22 },
+      { freq: 3000, q: 0.86, weight: 0.42 },
+      { freq: 3800, q: 0.92, weight: 0.62 },
+      { freq: 5200, q: 1.0, weight: 0.82 },
+      { freq: 7200, q: 1.08, weight: 1.0 },
+      { freq: 9800, q: 1.0, weight: 0.82 }
+    ],
+    attackMs: 0.45,
+    releaseMs: 125
+  });
+  guardedBuffer = sourceConstrained.buffer;
+  moves.sibilanceRepair = sourceConstrained.moves || null;
+
+  const vocalBuzz = applySourceConstrainedVocalBuzzRepair(guardedBuffer, sourceReferenceBuffer, {
+    amount: 0.58,
+    allowedIncrease: 0.004,
+    threshold: 0.006,
+    ratio: 0.16,
+    maxMix: 0.38,
+    maxBandReduction: 0.42,
+    phaseSafe: true,
+    bands: [
+      { freq: 1800, q: 0.7, weight: 0.22 },
+      { freq: 2400, q: 0.8, weight: 0.42 },
+      { freq: 3200, q: 0.88, weight: 0.66 },
+      { freq: 4200, q: 0.96, weight: 0.74 },
+      { freq: 5600, q: 1.02, weight: 0.52 }
+    ],
+    attackMs: 0.75,
+    releaseMs: 130,
+    detectorAttackMs: 0.42,
+    detectorReleaseMs: 36
+  });
+  guardedBuffer = vocalBuzz.buffer;
+  moves.vocalBuzzRepair = vocalBuzz.moves || null;
+
+  const addedGuard = applyAddedSibilanceGuard(guardedBuffer, sourceReferenceBuffer, {
+    amount: 0.64,
+    threshold: 0.008,
+    allowedIncrease: 0.015,
+    ratio: 0.22,
+    maxCutDB: 3.0,
+    airCutDB: 1.2,
+    detectorQ: 1.0,
+    attackMs: 0.28,
+    releaseMs: 115
+  });
+  guardedBuffer = addedGuard.buffer;
+  moves.addedSibilanceGuard = addedGuard.moves || null;
+
+  const noiseVeto = applySourceConstrainedNoiseVeto(guardedBuffer, sourceReferenceBuffer, {
+    amount: 0.88,
+    allowedIncrease: 0.003,
+    threshold: 0.0045,
+    ratio: 0.13,
+    maxMix: 0.78,
+    maxBandReduction: 0.78,
+    attackMs: 0.16,
+    releaseMs: 105
+  });
+  guardedBuffer = noiseVeto.buffer;
+  moves.addedNoiseVeto = noiseVeto.moves || null;
+
+  return { buffer: guardedBuffer, moves };
 }
 
 /**
@@ -1286,6 +1493,37 @@ function applyParametricEQ(buffer, settings) {
   return outBuffer;
 }
 
+function applyMasterToneControls(buffer, settings, sourceReferenceBuffer = buffer) {
+  const sourceFormat = String(settings.sourceFormat || (settings.isLossySource ? 'mp3' : 'wav')).toLowerCase();
+  const isWavSource = sourceFormat !== 'mp3' && !settings.isLossySource;
+  const sourceAnalysis = sourceReferenceBuffer ? analyzeAIGeneratedMastering(sourceReferenceBuffer) : null;
+  const sourceProfile = sourceAnalysis?.profile || {};
+  const sourcePeaks = sourceAnalysis?.peaks || {};
+  const highRisk =
+    (sourceProfile.harshDB ?? -18) > -12.5 ||
+    (sourceProfile.metallicDB ?? -18) > -15 ||
+    (sourcePeaks.spikeDensity ?? 0) > 0.006;
+
+  const bass = Math.max(-2.5, Math.min(2.5, Number(settings.masterBass) || 0));
+  const mid = Math.max(-2.5, Math.min(2.5, Number(settings.masterMid) || 0));
+  let high = Math.max(-2.5, Math.min(2.5, Number(settings.masterHigh) || 0));
+  if (isWavSource && high > 0) {
+    high = Math.min(high, highRisk ? 0 : 0.8);
+  }
+
+  let outBuffer = buffer;
+  if (Math.abs(bass) >= 0.05) {
+    outBuffer = applyBiquadFilter(outBuffer, 'lowshelf', 95, bass, 0.7, buffer.sampleRate);
+  }
+  if (Math.abs(mid) >= 0.05) {
+    outBuffer = applyBiquadFilter(outBuffer, 'peaking', 1600, mid, 0.82, buffer.sampleRate);
+  }
+  if (Math.abs(high) >= 0.05) {
+    outBuffer = applyBiquadFilter(outBuffer, 'highshelf', 10500, high, 0.62, buffer.sampleRate);
+  }
+  return outBuffer;
+}
+
 /**
  * Apply Glue Compressor (Stereo Linked)
  */
@@ -1514,9 +1752,12 @@ self.onmessage = async (e) => {
 
         // Track level through the chain
         console.log(`[Worker Chain] Starting render (Mode: ${mode})`);
-        const losslessTransparentMasterMode = settings.aiEnhance !== false;
-        const artifactSafeMode = losslessTransparentMasterMode;
-        const losslessArtifactSafeMode = losslessTransparentMasterMode;
+        const sourceFormat = String(settings.sourceFormat || (settings.isLossySource ? 'mp3' : 'wav')).toLowerCase();
+        const isWavSource = sourceFormat !== 'mp3' && !settings.isLossySource;
+        const isMp3Source = sourceFormat === 'mp3' || Boolean(settings.isLossySource);
+        const wavTransparentMasterMode = isWavSource && settings.aiEnhance !== false;
+        const artifactSafeMode = wavTransparentMasterMode || isMp3Source || Boolean(settings.artifactRescueMode);
+        const losslessArtifactSafeMode = wavTransparentMasterMode;
         const rescueArtifactMode = (settings.artifactProtection ?? 0) >= 0.85;
         const requestedTargetLufs = settings.targetLufs ?? -14;
         const safeTargetLufs = losslessArtifactSafeMode
@@ -1537,6 +1778,11 @@ self.onmessage = async (e) => {
         };
 
         // --- HEAVY FX (Shared) ---
+
+        let aiProfile = {
+          softClipDrive: 1.5,
+          maxLimiterPushDB: 1.2
+        };
 
         // 0. Input Gain (pre-FX, pre-limiter)
         const inputGainDb = Number(settings.inputGain) || 0;
@@ -1561,13 +1807,13 @@ self.onmessage = async (e) => {
             highpassQ: 0.7
           });
         }
-
+        if (wavTransparentMasterMode) {
+          sendProgress(id, 0.14, 'Applying source-safe polish...');
+          const polished = applyLosslessCommercialPolish(buffer, sourceReferenceBuffer, settings);
+          buffer = polished.buffer;
+          chainDebug.losslessCommercialPolish = polished.moves || null;
+        }
         // 1. Deharsh / Hybrid Dynamic Processor (if enabled)
-        let aiProfile = {
-          softClipDrive: 1.5,
-          maxLimiterPushDB: 1.2
-        };
-
         if (settings.deharsh && !artifactSafeMode) {
           sendProgress(id, 0.15, 'Applying hybrid dynamic processor...');
           buffer = processHybridDynamic(buffer, 'mastering');
@@ -1633,7 +1879,7 @@ self.onmessage = async (e) => {
           buffer = applyMultibandTransient(buffer, undefined, { amount: transientAmount });
         }
 
-        if (artifactSafeMode && !losslessTransparentMasterMode) {
+        if (artifactSafeMode && !wavTransparentMasterMode) {
           sendProgress(id, 0.56, 'Suppressing mid/high crackle artifacts...');
           const artifactAmount = Math.max(0, Math.min(1, settings.artifactProtection ?? 0.7));
           const artifactPreAnalysis = analyzeAIGeneratedMastering(buffer);
@@ -1789,13 +2035,14 @@ self.onmessage = async (e) => {
         // HPF is controlled by Clean Low End; LPF opens up on clean or already dark sources.
         sendProgress(id, 0.60, 'Applying final filters...');
         const finalFilterAnalysis = settings.aiEnhance !== false && !artifactSafeMode ? analyzeAIGeneratedMastering(buffer) : null;
-        const finalFilterOptions = losslessTransparentMasterMode
+        const finalFilterOptions = wavTransparentMasterMode
           ? { lowpass: false, lowpassFreq: 20500 }
           : getAdaptiveFinalFilterOptions(finalFilterAnalysis, settings);
         buffer = applyFinalFilters(buffer, {
           highpass: false,
           ...finalFilterOptions
         });
+        buffer = applyMasterToneControls(buffer, settings, sourceReferenceBuffer);
 
         // 6. EQ (5-Band) + Cut Mud
         if (!artifactSafeMode) {
@@ -1856,7 +2103,7 @@ self.onmessage = async (e) => {
                 data[i] *= gainLin;
               }
             }
-            if (settings.truePeakLimit && desiredGainDB > gainDB + 0.25 && !losslessTransparentMasterMode) {
+            if (settings.truePeakLimit && desiredGainDB > gainDB + 0.25 && !wavTransparentMasterMode) {
               const artifactAmount = Math.max(0, Math.min(1, settings.artifactProtection ?? 0.7));
               const calibrated = finalizeMasteringTarget(buffer, {
                 targetLufs: safeTargetLufs,
@@ -2044,12 +2291,11 @@ self.onmessage = async (e) => {
         }
 
         if (settings.aiEnhance !== false && losslessArtifactSafeMode) {
-          sendProgress(id, 0.988, 'Keeping lossless master transparent...');
           chainDebug.losslessTransparentMaster = {
-            repairGuardsBypassed: true,
             dynamicDeEssBypassed: true,
             finalLowpassBypassed: true,
-            limiterCalibrationBypassed: true
+            limiterCalibrationBypassed: true,
+            sourceConstrainedArtifactGuard: 'deferred-to-final-export-guard'
           };
         } else if (settings.aiEnhance !== false) {
           sendProgress(id, 0.988, 'Removing added sibilance...');
@@ -2146,8 +2392,10 @@ self.onmessage = async (e) => {
         }
 
         if (settings.aiEnhance !== false && losslessArtifactSafeMode) {
-          sendProgress(id, 0.992, 'Preserving lossless source texture...');
-          chainDebug.finalLosslessRepairGuardsBypassed = true;
+          sendProgress(id, 0.992, 'Checking final lossless added fizz...');
+          const finalLosslessGuarded = applyLosslessSourceArtifactGuard(buffer, sourceReferenceBuffer);
+          buffer = finalLosslessGuarded.buffer;
+          chainDebug.finalLosslessSourceArtifactGuard = finalLosslessGuarded.moves || null;
         } else if (settings.aiEnhance !== false) {
           sendProgress(id, 0.992, 'Checking final added fizz...');
           const toneGuarded = applySourceDifferentialToneGuard(buffer, sourceReferenceBuffer, {
